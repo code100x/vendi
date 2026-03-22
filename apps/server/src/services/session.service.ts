@@ -133,7 +133,7 @@ async function _sendMessage(sessionId: string, content: string, options?: { hidd
   // Build system prompt
   const systemPrompt = buildSystemPrompt(session.project);
 
-  // Run agent turn (Claude Agent SDK inside sandbox via OpenRouter)
+  // Run Codex inside the sandbox
   await runAgentTurn({
     sessionId,
     sandboxId: session.sandboxId,
@@ -167,10 +167,16 @@ function buildSystemPrompt(project: {
     "- Explain what you changed in simple, non-technical terms.",
     "- Do NOT show code diffs or terminal output to the user.",
     "- If something breaks, fix it before reporting back.",
-    "- Always commit your changes with clear commit messages.",
+    "- Do NOT commit or push changes. Vendi handles that after the session.",
     "- Keep the dev server running after making changes.",
+    "- For long-running dev servers, use a detached start command such as `nohup ... >/tmp/<name>.log 2>&1 < /dev/null &` or `setsid ... >/tmp/<name>.log 2>&1 < /dev/null &`.",
+    "- Verify the expected local ports with curl before claiming the project is running.",
     "- You have bun, node, npm, git, postgresql, and redis available in this environment.",
     "- The .env file may need to be copied to subdirectories (e.g. backend/) — check where the project expects it.",
+    "- When creating or fixing env files, inspect the codebase for the actual env names it reads before replying.",
+    "- Infer obvious frontend aliases without asking the user again. Example: if the frontend reads `import.meta.env.VITE_GITHUB_CLIENT_ID` and `.env` only has `GITHUB_CLIENT_ID`, add the `VITE_` version with the same value.",
+    "- Treat server secrets and frontend public keys as different values unless they are obviously the same identifier with only a framework prefix change.",
+    "- If a frontend env value is truly distinct and cannot be derived safely, state exactly which name is still missing.",
   ];
 
   if (project.contextInstructions) {

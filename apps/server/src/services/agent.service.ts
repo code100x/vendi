@@ -1,9 +1,7 @@
+import { createHash, randomUUID } from "node:crypto";
 import { Sandbox } from "e2b";
 import { prisma } from "../lib/prisma";
 import { env } from "../config/env";
-
-const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
-const MODEL = "anthropic/claude-sonnet-4";
 
 interface AgentRunConfig {
   sessionId: string;
@@ -13,158 +11,308 @@ interface AgentRunConfig {
   maxBudgetUsd: number;
 }
 
-const tools = [
-  { type: "function" as const, function: { name: "read_file", description: "Read a file", parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } } },
-  { type: "function" as const, function: { name: "write_file", description: "Write/create a file", parameters: { type: "object", properties: { path: { type: "string" }, content: { type: "string" } }, required: ["path", "content"] } } },
-  { type: "function" as const, function: { name: "edit_file", description: "Replace a string in a file", parameters: { type: "object", properties: { path: { type: "string" }, old_string: { type: "string" }, new_string: { type: "string" } }, required: ["path", "old_string", "new_string"] } } },
-  { type: "function" as const, function: { name: "run_command", description: "Run a shell command in /workspace", parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] } } },
-  { type: "function" as const, function: { name: "list_files", description: "List files in a directory", parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } } },
-  { type: "function" as const, function: { name: "search_code", description: "Search for a pattern in files", parameters: { type: "object", properties: { pattern: { type: "string" } }, required: ["pattern"] } } },
-];
+const CODEX_STATE_DIR = "/workspace/.vendi";
+const READY_MARKER = `${CODEX_STATE_DIR}/codex-ready`;
+const MODEL_FILE = `${CODEX_STATE_DIR}/model.txt`;
+const CODEX_HOME_DIR = `${CODEX_STATE_DIR}/home`;
+const CODEX_AUTH_FILE = `${CODEX_HOME_DIR}/.codex/auth.json`;
+const OPENAI_KEY_FINGERPRINT_FILE = `${CODEX_STATE_DIR}/openai-key.sha256`;
+const PREFERRED_MODEL = "gpt-5.4";
+const FALLBACK_MODELS = ["gpt-5.3-codex"];
+const REASONING_EFFORT = "high";
+const OPENAI_MODELS_URL = "https://api.openai.com/v1/models";
+const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
 
-async function executeTool(sandbox: Sandbox, name: string, args: Record<string, string>): Promise<string> {
-  try {
-    switch (name) {
-      case "read_file":
-        return String(await sandbox.files.read(args.path));
-      case "write_file":
-        await sandbox.files.write(args.path, args.content);
-        return `File written: ${args.path}`;
-      case "edit_file": {
-        const content = String(await sandbox.files.read(args.path));
-        if (!content.includes(args.old_string)) return `Error: string not found in ${args.path}`;
-        await sandbox.files.write(args.path, content.replace(args.old_string, args.new_string));
-        return `File edited: ${args.path}`;
-      }
-      case "run_command": {
-        const r = await sandbox.commands.run(`cd /workspace && ${args.command}`, { requestTimeoutMs: 120_000 });
-        return ((r.stdout || "") + (r.stderr ? "\nSTDERR: " + r.stderr : "")).slice(0, 5000) || `Exit: ${r.exitCode}`;
-      }
-      case "list_files": {
-        const r = await sandbox.commands.run(`find ${args.path} -maxdepth 2 -type f 2>/dev/null | head -50`, { requestTimeoutMs: 10_000 });
-        return r.stdout || "No files found";
-      }
-      case "search_code": {
-        const r = await sandbox.commands.run(
-          `cd /workspace && grep -rn "${args.pattern.replace(/"/g, '\\"')}" --include="*.ts" --include="*.tsx" --include="*.js" --include="*.json" --include="*.env*" --include="*.yml" --include="*.md" --include="*.prisma" 2>/dev/null | head -30`,
-          { requestTimeoutMs: 10_000 }
-        );
-        return r.stdout || "No matches";
-      }
-      default:
-        return "Unknown tool";
+interface CommandResult {
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+}
+
+function shellEscape(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+async function ensureStateDir(sandbox: Sandbox): Promise<void> {
+  await sandbox.commands.run(`mkdir -p ${CODEX_STATE_DIR} ${CODEX_HOME_DIR}`, {
+    requestTimeoutMs: 10_000,
+  });
+}
+
+function getOpenAIKeyFingerprint(): string {
+  return createHash("sha256").update(env.OPENAI_API_KEY || "").digest("hex");
+}
+
+async function ensureCodexAuth(sandbox: Sandbox): Promise<void> {
+  const existingFingerprint = (await readIfExists(sandbox, OPENAI_KEY_FINGERPRINT_FILE)).trim();
+  const currentFingerprint = getOpenAIKeyFingerprint();
+
+  if (existingFingerprint === currentFingerprint) {
+    try {
+      const result = await sandbox.commands.run(`test -f ${CODEX_AUTH_FILE}`, {
+        requestTimeoutMs: 5_000,
+      });
+      if (result.exitCode === 0) return;
+    } catch (error: any) {
+      if (error?.result?.exitCode !== 1) throw error;
     }
-  } catch (e) {
-    return `Error: ${e instanceof Error ? e.message : String(e)}`;
+  }
+
+  const loginCommand =
+    `cd /workspace && mkdir -p ${shellEscape(CODEX_HOME_DIR)} && ` +
+    `OPENAI_API_KEY=${shellEscape(env.OPENAI_API_KEY || "")} ` +
+    `HOME=${shellEscape(CODEX_HOME_DIR)} ` +
+    `bash -lc ${shellEscape('printf %s "$OPENAI_API_KEY" | codex login --with-api-key')}`;
+
+  const result = await sandbox.commands.run(loginCommand, {
+    requestTimeoutMs: 120_000,
+  });
+
+  if (result.exitCode !== 0) {
+    const failure = [result.stderr, result.stdout].find(Boolean)?.trim() || "Codex login failed.";
+    throw new Error(failure.slice(0, 1000));
+  }
+
+  await sandbox.files.write(OPENAI_KEY_FINGERPRINT_FILE, currentFingerprint);
+}
+
+async function hasExistingSession(sandbox: Sandbox): Promise<boolean> {
+  try {
+    const result = await sandbox.commands.run(`test -f ${READY_MARKER}`, {
+      requestTimeoutMs: 5_000,
+    });
+    return result.exitCode === 0;
+  } catch (error: any) {
+    if (error?.result?.exitCode === 1) return false;
+    throw error;
   }
 }
 
-async function callLLM(messages: any[]): Promise<any> {
-  const res = await fetch(OPENROUTER_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${env.OPENROUTER_API_KEY}`,
-      "X-Title": "Vendi",
-    },
-    body: JSON.stringify({ model: MODEL, messages, tools, max_tokens: 4096 }),
-  });
-  if (!res.ok) throw new Error(`OpenRouter error ${res.status}: ${await res.text()}`);
-  return res.json();
+async function readIfExists(sandbox: Sandbox, path: string): Promise<string> {
+  try {
+    return String(await sandbox.files.read(path));
+  } catch {
+    return "";
+  }
 }
 
-// Per-session conversation history
-const sessionHistories = new Map<string, any[]>();
+async function getSessionModels(sandbox: Sandbox): Promise<string[]> {
+  const savedModel = (await readIfExists(sandbox, MODEL_FILE)).trim();
+  if (savedModel) return [savedModel];
+  return [PREFERRED_MODEL, ...FALLBACK_MODELS];
+}
+
+async function listChangedFiles(sandbox: Sandbox): Promise<string[]> {
+  const result = await sandbox.commands.run(
+    "cd /workspace && git status --porcelain",
+    { requestTimeoutMs: 10_000 }
+  );
+
+  if (!result.stdout) return [];
+
+  return result.stdout
+    .split("\n")
+    .map((line: string) => line.trim())
+    .filter(Boolean)
+    .map((line: string) => line.slice(3).trim())
+    .filter(Boolean)
+    .slice(0, 50);
+}
+
+function buildPrompt(systemPrompt: string, userMessage: string, maxBudgetUsd: number): string {
+  return [
+    systemPrompt,
+    "",
+    "OPERATION RULES:",
+    `- Keep working until the request is complete or you need a concrete answer from the user.`,
+    `- Budget target: $${maxBudgetUsd.toFixed(2)}.`,
+    "- Keep user-facing updates brief and non-technical.",
+    "- If you need clarification, ask one focused question at the end.",
+    "- For long-running dev servers, launch them in a detached way so they survive after this Codex turn exits.",
+    "- Prefer `nohup ... >/tmp/<name>.log 2>&1 < /dev/null &` or `setsid ... >/tmp/<name>.log 2>&1 < /dev/null &` for dev servers.",
+    "- Do not leave the task blocked on an attached foreground server process.",
+    "- After starting a dev server, verify it with curl on the expected port before reporting success.",
+    "- If the task involves creating or fixing env files, inspect the codebase for the exact env names it reads before replying.",
+    "- Infer obvious aliases instead of asking the user again. Example: add `VITE_GITHUB_CLIENT_ID` from `GITHUB_CLIENT_ID` when the frontend reads the `VITE_` name.",
+    "- Only ask for an env value when it is truly distinct and cannot be derived safely from what already exists.",
+    "",
+    "USER REQUEST:",
+    userMessage,
+  ].join("\n");
+}
+
+async function diagnoseOpenAIFailure(): Promise<string | null> {
+  if (!env.OPENAI_API_KEY) return "OPENAI_API_KEY is not set on the server.";
+
+  const headers = {
+    Authorization: `Bearer ${env.OPENAI_API_KEY}`,
+    "Content-Type": "application/json",
+  };
+
+  try {
+    const modelsRes = await fetch(OPENAI_MODELS_URL, {
+      method: "GET",
+      headers,
+    });
+
+    if (!modelsRes.ok) {
+      const body = await modelsRes.text();
+      return `OpenAI auth check failed (${modelsRes.status}). ${body.slice(0, 300)}`;
+    }
+
+    const responsesRes = await fetch(OPENAI_RESPONSES_URL, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        model: "gpt-5.4-mini",
+        input: "Reply with exactly OK.",
+      }),
+    });
+
+    if (responsesRes.ok) return null;
+
+    const body = await responsesRes.text();
+    if (responsesRes.status === 429 && body.includes("insufficient_quota")) {
+      return "The OpenAI API key is valid, but the project has no usable Responses quota right now.";
+    }
+
+    return `OpenAI Responses check failed (${responsesRes.status}). ${body.slice(0, 300)}`;
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+}
+
+async function runCodexCommand(
+  sandbox: Sandbox,
+  model: string,
+  promptPath: string,
+  outputPath: string,
+  resume: boolean
+): Promise<CommandResult> {
+  const baseArgs = [
+    "codex",
+    "exec",
+    ...(resume ? ["resume", "--last"] : []),
+    "--json",
+    "--dangerously-bypass-approvals-and-sandbox",
+    "--model",
+    model,
+    "-c",
+    `model_reasoning_effort="${REASONING_EFFORT}"`,
+    "-c",
+    'experimental_realtime_ws_mode="disabled"',
+    ...(resume ? [] : ["-C", "/workspace"]),
+    "--skip-git-repo-check",
+    "--output-last-message",
+    outputPath,
+    "-",
+  ];
+
+  const command =
+    `cd /workspace && ` +
+    `OPENAI_API_KEY=${shellEscape(env.OPENAI_API_KEY || "")} ` +
+    `HOME=${shellEscape(CODEX_HOME_DIR)} ` +
+    `${baseArgs.map(shellEscape).join(" ")} < ${shellEscape(promptPath)}`;
+  try {
+    return await sandbox.commands.run(command, {
+      requestTimeoutMs: 20 * 60 * 1000,
+      timeoutMs: 0,
+    });
+  } catch (error: any) {
+    if (error?.result) return error.result as CommandResult;
+    throw error;
+  }
+}
 
 export async function runAgentTurn(config: AgentRunConfig): Promise<void> {
-  const { sessionId, sandboxId, userMessage, systemPrompt } = config;
+  const { sessionId, sandboxId, userMessage, systemPrompt, maxBudgetUsd } = config;
 
-  if (!env.OPENROUTER_API_KEY) throw new Error("OPENROUTER_API_KEY not set");
+  if (!env.OPENAI_API_KEY) throw new Error("OPENAI_API_KEY not set");
 
   const sandbox = await Sandbox.connect(sandboxId);
+  await ensureStateDir(sandbox);
+  await ensureCodexAuth(sandbox);
 
-  let messages = sessionHistories.get(sessionId);
-  if (!messages) {
-    messages = [{ role: "system", content: systemPrompt }];
-    sessionHistories.set(sessionId, messages);
-  }
+  const runId = randomUUID();
+  const promptPath = `${CODEX_STATE_DIR}/prompt-${runId}.txt`;
+  const outputPath = `${CODEX_STATE_DIR}/last-message-${runId}.txt`;
 
-  messages.push({ role: "user", content: userMessage });
+  const prompt = buildPrompt(systemPrompt, userMessage, maxBudgetUsd);
+  await sandbox.files.write(promptPath, prompt);
 
-  const filesChanged: string[] = [];
-  let iterations = 0;
+  await prisma.chatMessage.create({
+    data: {
+      sessionId,
+      role: "SYSTEM",
+      content: "Codex is working on it...",
+    },
+  });
 
-  while (iterations < 30) {
-    iterations++;
+  let result: CommandResult | null = null;
+  const resume = await hasExistingSession(sandbox);
+  const models = await getSessionModels(sandbox);
+  let chosenModel = models[0];
 
-    const data = await callLLM(messages);
-    const msg = data.choices?.[0]?.message;
-    if (!msg) throw new Error("No LLM response");
+  for (let index = 0; index < models.length; index++) {
+    const model = models[index]!;
+    const shouldResume = index === 0 ? resume : false;
+    const attempt = await runCodexCommand(sandbox, model, promptPath, outputPath, shouldResume);
 
-    messages.push(msg);
-
-    // Save intermediate text immediately so user sees progress
-    if (msg.content && msg.tool_calls) {
-      await prisma.chatMessage.create({
-        data: { sessionId, role: "ASSISTANT", content: msg.content },
-      });
+    if (attempt.exitCode === 0) {
+      result = attempt;
+      chosenModel = model;
+      break;
     }
 
-    if (msg.tool_calls && msg.tool_calls.length > 0) {
-      for (const tc of msg.tool_calls) {
-        const { name, arguments: argsStr } = tc.function;
-        let args: Record<string, string>;
-        try { args = JSON.parse(argsStr); } catch { args = {}; }
+    const failureText = [attempt.stderr, attempt.stdout].find(Boolean)?.trim() || "";
+    const canFallback =
+      index < models.length - 1 &&
+      !resume &&
+      failureText.includes("responses_websocket");
 
-        // Show progress for commands
-        if (name === "run_command" && args.command) {
-          const shortCmd = args.command.length > 80 ? args.command.substring(0, 80) + "..." : args.command;
-          await prisma.chatMessage.create({
-            data: { sessionId, role: "SYSTEM", content: `Running: ${shortCmd}` },
-          });
-        }
-
-        const result = await executeTool(sandbox, name, args);
-
-        if ((name === "write_file" || name === "edit_file") && args.path) {
-          filesChanged.push(args.path.replace("/workspace/", ""));
-        }
-
-        messages.push({ role: "tool", tool_call_id: tc.id, content: result });
-      }
-      continue;
+    if (!canFallback) {
+      result = attempt;
+      chosenModel = model;
+      break;
     }
 
-    // Got final text response — save it
-    break;
-  }
-
-  // If exhausted iterations, force a summary
-  if (iterations >= 30) {
-    messages.push({ role: "user", content: "Summarize what you did and the current state." });
-    const summary = await callLLM(messages);
-    const summaryMsg = summary.choices?.[0]?.message;
-    if (summaryMsg) messages.push(summaryMsg);
-  }
-
-  // Save final response
-  const lastAssistant = messages.filter((m: any) => m.role === "assistant" && m.content).pop();
-  const responseText = lastAssistant?.content || "";
-
-  if (responseText) {
-    // Check if we already saved this as an intermediate message
-    const existing = await prisma.chatMessage.findFirst({
-      where: { sessionId, role: "ASSISTANT", content: responseText },
+    await prisma.chatMessage.create({
+      data: {
+        sessionId,
+        role: "SYSTEM",
+        content: `Codex hit a model transport issue on ${model}. Retrying with ${models[index + 1]}.`,
+      },
     });
-    if (!existing) {
-      await prisma.chatMessage.create({
-        data: {
-          sessionId,
-          role: "ASSISTANT",
-          content: responseText,
-          metadata: filesChanged.length > 0 ? { filesChanged } : undefined,
-        },
-      });
+  }
+
+  if (!result) throw new Error("Codex did not return a result.");
+
+  const finalMessage = (await readIfExists(sandbox, outputPath)).trim();
+  const changedFiles = await listChangedFiles(sandbox);
+
+  if (result.exitCode === 0) {
+    await sandbox.files.write(MODEL_FILE, chosenModel);
+    await sandbox.commands.run(`touch ${READY_MARKER}`, { requestTimeoutMs: 5_000 });
+
+    await prisma.chatMessage.create({
+      data: {
+        sessionId,
+        role: "ASSISTANT",
+        content: finalMessage || "Done.",
+        metadata: changedFiles.length > 0 ? { filesChanged: changedFiles } : undefined,
+      },
+    });
+    return;
+  }
+
+  const failureDetails = [result.stderr, result.stdout].find(Boolean)?.trim() || "Codex exited without a response.";
+
+  if (failureDetails.includes("responses_websocket")) {
+    const diagnosis = await diagnoseOpenAIFailure();
+    if (diagnosis) {
+      throw new Error(`${diagnosis} Original Codex error: ${failureDetails}`.slice(0, 1000));
     }
   }
+
+  throw new Error(failureDetails.slice(0, 1000));
 }

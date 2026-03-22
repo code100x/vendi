@@ -39,6 +39,7 @@ export async function startSessionSandbox(
     timeoutMs: project.maxSessionDurationMin * 60 * 1000,
     envs: {
       GITHUB_TOKEN: githubToken,
+      ...(env.OPENAI_API_KEY ? { OPENAI_API_KEY: env.OPENAI_API_KEY } : {}),
     },
   });
 
