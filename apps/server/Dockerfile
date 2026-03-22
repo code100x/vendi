@@ -30,12 +30,10 @@ FROM base AS production
 ENV NODE_ENV=production
 WORKDIR /app
 
-COPY --from=deps /app/node_modules ./node_modules
-COPY --from=deps /app/apps/server/node_modules ./apps/server/node_modules
+COPY --from=build /app/node_modules ./node_modules
 COPY --from=shared-build /app/packages/shared/dist ./packages/shared/dist
 COPY --from=shared-build /app/packages/shared/package.json ./packages/shared/
 COPY --from=build /app/apps/server/dist ./apps/server/dist
-COPY --from=build /app/apps/server/node_modules/.prisma ./apps/server/node_modules/.prisma
 COPY apps/server/prisma ./apps/server/prisma
 COPY apps/server/package.json ./apps/server/
 COPY package.json ./
