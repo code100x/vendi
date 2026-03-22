@@ -5,12 +5,13 @@ WORKDIR /app
 # ---- Dependencies ----
 FROM base AS deps
 
-# Copy workspace root files
+# Copy all workspace package.json files so lockfile matches
 COPY package.json bun.lock bunfig.toml ./
 COPY packages/shared/package.json ./packages/shared/
 COPY apps/web/package.json ./apps/web/
+COPY apps/server/package.json ./apps/server/
 
-RUN bun install
+RUN bun install --frozen-lockfile
 
 # ---- Build shared package ----
 FROM deps AS shared-build
