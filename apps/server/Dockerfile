@@ -11,7 +11,7 @@ COPY packages/shared/package.json ./packages/shared/
 COPY apps/server/package.json ./apps/server/
 
 # Install all dependencies (including devDependencies for prisma generate)
-RUN bun install --frozen-lockfile
+RUN bun install
 
 # ---- Build shared package ----
 FROM deps AS shared-build
@@ -36,7 +36,7 @@ COPY packages/shared/package.json ./packages/shared/
 COPY apps/server/package.json ./apps/server/
 
 # Install production dependencies only
-RUN bun install --frozen-lockfile --production
+RUN bun install --production
 
 # Copy built artifacts
 COPY --from=shared-build /app/packages/shared/dist ./packages/shared/dist

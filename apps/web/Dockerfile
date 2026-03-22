@@ -10,7 +10,7 @@ COPY package.json bun.lock bunfig.toml ./
 COPY packages/shared/package.json ./packages/shared/
 COPY apps/web/package.json ./apps/web/
 
-RUN bun install --frozen-lockfile
+RUN bun install
 
 # ---- Build shared package ----
 FROM deps AS shared-build
