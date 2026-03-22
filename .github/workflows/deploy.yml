@@ -1,0 +1,56 @@
+name: Continuous Deployment (Prod)
+
+on:
+  push:
+    branches: ["main"]
+
+jobs:
+  build-and-deploy-server:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Docker login
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_SECRET }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: Build and push server image
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          file: apps/server/Dockerfile
+          push: true
+          tags: 100xdevs/vendi-server:${{ github.sha }}
+
+      - name: Build and push web image
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          file: apps/web/Dockerfile
+          push: true
+          tags: 100xdevs/vendi-web:${{ github.sha }}
+          build-args: |
+            VITE_API_URL=https://api.vendi.100xdevs.com
+
+      - name: Clone production-ops repo, update image tags, and push
+        env:
+          PAT: ${{ secrets.PAT }}
+        run: |
+          git clone https://${PAT}@github.com/codes30/production-ops.git
+          cd production-ops
+
+          sed -i 's|image: 100xdevs/vendi-server:.*|image: 100xdevs/vendi-server:${{ github.sha }}|' 100xdevs/prod/vendi-server/deployment.yml
+          sed -i 's|image: 100xdevs/vendi-web:.*|image: 100xdevs/vendi-web:${{ github.sha }}|' 100xdevs/prod/vendi-web/deployment.yml
+
+          git config user.name "GitHub Actions Bot"
+          git config user.email "actions@github.com"
+          git add .
+          git commit -m "Update vendi image tags to ${{ github.sha }}"
+          git push https://${PAT}@github.com/codes30/production-ops.git main
