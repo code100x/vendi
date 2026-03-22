@@ -106,7 +106,7 @@ async function callLLM(messages: any[]): Promise<any> {
       Authorization: `Bearer ${env.OPENROUTER_API_KEY}`,
       "X-Title": "Vendi",
     },
-    body: JSON.stringify({ model: MODEL, messages, tools, max_tokens: 4096 }),
+    body: JSON.stringify({ model: MODEL, messages, tools, max_tokens: 1024 }),
   });
   if (!res.ok) throw new Error(`OpenRouter error ${res.status}: ${await res.text()}`);
   return res.json();
@@ -268,6 +268,12 @@ async function handlePossibleCompletion(projectId: string, state: SetupState, re
     await cleanupSetup(projectId);
   } catch (err) {
     console.error("Failed to parse setup config:", err);
+    const message = err instanceof Error ? err.message : String(err);
+    addChatMsg(
+      state,
+      "SYSTEM",
+      `Couldn't save the setup config. The [SETUP_COMPLETE] block must be valid JSON. ${message.slice(0, 160)}`
+    );
   }
 }
 

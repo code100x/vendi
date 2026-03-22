@@ -1,6 +1,7 @@
 {
   "name": "vendi",
   "private": true,
+  "packageManager": "bun@1.3.9",
   "workspaces": [
     "apps/*",
     "packages/*"
