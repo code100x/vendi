@@ -1,0 +1,197 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id              String    @id @default(cuid())
+  email           String    @unique
+  name            String?
+  avatarUrl       String?
+  githubId        String?   @unique
+  googleId        String?   @unique
+  encryptedApiKey String?
+  apiKeyIv        String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  authSessions    AuthSession[]
+  oauthAccounts   OAuthAccount[]
+  orgMemberships  OrgMember[]
+  sessions        Session[]
+}
+
+model OAuthAccount {
+  id                String    @id @default(cuid())
+  userId            String
+  provider          String
+  providerAccountId String
+  accessToken       String
+  refreshToken      String?
+  expiresAt         DateTime?
+  scopes            String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+}
+
+model AuthSession {
+  id        String   @id
+  userId    String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model Organization {
+  id                   String   @id @default(cuid())
+  name                 String
+  slug                 String   @unique
+  githubInstallationId Int?
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  members  OrgMember[]
+  projects Project[]
+  invites  OrgInvite[]
+}
+
+model OrgMember {
+  id       String   @id @default(cuid())
+  userId   String
+  orgId    String
+  role     OrgRole  @default(MEMBER)
+  joinedAt DateTime @default(now())
+
+  user User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  org  Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, orgId])
+  @@index([orgId])
+}
+
+enum OrgRole {
+  ADMIN
+  MEMBER
+}
+
+model OrgInvite {
+  id         String    @id @default(cuid())
+  orgId      String
+  email      String?
+  token      String    @unique @default(cuid())
+  role       OrgRole   @default(MEMBER)
+  expiresAt  DateTime
+  acceptedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  org Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  @@index([orgId])
+  @@index([token])
+}
+
+model Project {
+  id                    String         @id @default(cuid())
+  orgId                 String
+  name                  String
+  githubRepoFullName    String
+  githubRepoUrl         String
+  defaultBranch         String         @default("main")
+  envVars               String?
+  envVarsIv             String?
+  contextInstructions   String?        @db.Text
+  startupCommands       String[]
+  requiredServices      String[]
+  allowedFilePatterns   String[]
+  devServerPort         Int            @default(3000)
+  e2bTemplateId         String?
+  templateStatus        TemplateStatus @default(PENDING)
+  templateBuildLog      String?        @db.Text
+  maxSessionDurationMin Int            @default(60)
+  maxBudgetUsd          Float          @default(5.0)
+  createdAt             DateTime       @default(now())
+  updatedAt             DateTime       @updatedAt
+
+  org      Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  sessions Session[]
+
+  @@unique([orgId, githubRepoFullName])
+  @@index([orgId])
+}
+
+enum TemplateStatus {
+  PENDING
+  BUILDING
+  READY
+  FAILED
+}
+
+model Session {
+  id             String          @id @default(cuid())
+  projectId      String
+  userId         String
+  branchName     String
+  status         SessionStatus   @default(STARTING)
+  sandboxId      String?
+  previewUrl     String?
+  totalTokensIn  Int             @default(0)
+  totalTokensOut Int             @default(0)
+  totalCostUsd   Float           @default(0)
+  outcome        SessionOutcome?
+  prUrl          String?
+  commitSha      String?
+  startedAt      DateTime        @default(now())
+  endedAt        DateTime?
+
+  project  Project       @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user     User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  messages ChatMessage[]
+
+  @@index([projectId])
+  @@index([userId])
+}
+
+enum SessionStatus {
+  STARTING
+  RUNNING
+  STOPPING
+  COMPLETED
+  ERRORED
+  TIMED_OUT
+}
+
+enum SessionOutcome {
+  PR_CREATED
+  COMMITTED_TO_MAIN
+  DISCARDED
+}
+
+model ChatMessage {
+  id         String      @id @default(cuid())
+  sessionId  String
+  role       MessageRole
+  content    String      @db.Text
+  rawContent String?     @db.Text
+  metadata   Json?
+  createdAt  DateTime    @default(now())
+
+  session Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId])
+}
+
+enum MessageRole {
+  USER
+  ASSISTANT
+  SYSTEM
+}

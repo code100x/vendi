@@ -1,0 +1,293 @@
+import { prisma } from "../lib/prisma";
+import { startSessionSandbox, stopSandbox, pushChangesFromSandbox } from "./sandbox.service";
+import { createPullRequest, mergePullRequest, deleteBranch } from "./github.service";
+import { runAgentTurn } from "./agent.service";
+import type { WsServerMessage } from "@vendi/shared";
+
+export async function startSession(projectId: string, userId: string) {
+  // Check project is ready
+  const project = await prisma.project.findUniqueOrThrow({
+    where: { id: projectId },
+  });
+
+  if (project.templateStatus !== "READY") {
+    throw new Error("Project template is not ready");
+  }
+
+  // Check for active sessions (conflict detection)
+  const activeSessions = await prisma.session.findMany({
+    where: {
+      projectId,
+      status: { in: ["STARTING", "RUNNING"] },
+    },
+    include: { user: { select: { id: true, name: true } } },
+  });
+
+  // Create session record
+  const session = await prisma.session.create({
+    data: {
+      projectId,
+      userId,
+      branchName: "", // Will be set by sandbox service
+      status: "STARTING",
+    },
+  });
+
+  try {
+    // Start the sandbox (async, updates session record)
+    const result = await startSessionSandbox(session.id, projectId, userId);
+
+    // Notify about conflicts via a system message
+    if (activeSessions.length > 0) {
+      const names = activeSessions.map((s) => s.user.name || "Someone").join(", ");
+      await prisma.chatMessage.create({
+        data: { sessionId: session.id, role: "SYSTEM", content: `Warning: ${names} also has an active session on this project.` },
+      });
+    }
+
+    const sessionResult = {
+      ...session,
+      sandboxId: result.sandboxId,
+      previewUrl: result.previewUrl,
+      status: "RUNNING" as const,
+    };
+
+    // Save a system message so the user sees progress via polling
+    await prisma.chatMessage.create({
+      data: { sessionId: sessionResult.id, role: "SYSTEM", content: "Setting up your project..." },
+    });
+
+    // Build explicit startup instructions from the project config
+    const startupSteps = project.startupCommands.length > 0
+      ? project.startupCommands.map((cmd, i) => `${i + 1}. Run: ${cmd}`).join("\n")
+      : "1. Read package.json and figure out how to install deps and start the server";
+
+    const setupPrompt = `The project has been cloned to /workspace and .env has been written at /workspace/.env.
+
+IMPORTANT: The .env file might need to be in a subdirectory (e.g. /workspace/backend/.env). Check where the project loads env vars from and copy it there if needed.
+
+${project.requiredServices.length > 0 ? `Services available: ${project.requiredServices.join(", ")} (already running).\n` : ""}
+Run these steps to start the project:
+${startupSteps}
+
+The dev server should be on port ${project.devServerPort || 3000}.
+
+As you work, output SHORT status updates like:
+- "Installing dependencies..."
+- "Running database setup..."
+- "Starting servers..."
+- "Everything is running!"
+
+If anything fails, fix it yourself. Keep messages short and non-technical.`;
+
+    // Fire and forget — don't block session creation
+    sendMessage(sessionResult.id, setupPrompt, { hidden: true }).catch((e) => {
+      console.error("[Session] Auto-setup failed:", e);
+    });
+
+    return sessionResult;
+  } catch (error) {
+    await prisma.session.update({
+      where: { id: session.id },
+      data: { status: "ERRORED", endedAt: new Date() },
+    });
+    throw error;
+  }
+}
+
+// Simple lock per session to prevent concurrent agent turns
+const sessionLocks = new Set<string>();
+
+export async function sendMessage(sessionId: string, content: string, options?: { hidden?: boolean }) {
+  // Wait for any existing agent turn to finish
+  while (sessionLocks.has(sessionId)) {
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+
+  sessionLocks.add(sessionId);
+
+  try {
+    return await _sendMessage(sessionId, content, options);
+  } finally {
+    sessionLocks.delete(sessionId);
+  }
+}
+
+async function _sendMessage(sessionId: string, content: string, options?: { hidden?: boolean }) {
+  const session = await prisma.session.findUniqueOrThrow({
+    where: { id: sessionId },
+    include: { project: true },
+  });
+
+  if (session.status !== "RUNNING" || !session.sandboxId) {
+    throw new Error("Session is not active");
+  }
+
+  // Save user message to DB (polling will pick it up) — skip for hidden messages
+  if (!options?.hidden) {
+    await prisma.chatMessage.create({
+      data: { sessionId, role: "USER", content },
+    });
+  }
+
+  // Build system prompt
+  const systemPrompt = buildSystemPrompt(session.project);
+
+  // Run agent turn (Claude Agent SDK inside sandbox via OpenRouter)
+  await runAgentTurn({
+    sessionId,
+    sandboxId: session.sandboxId,
+    userMessage: content,
+    systemPrompt,
+    maxBudgetUsd: session.project.maxBudgetUsd,
+  });
+}
+
+function buildSystemPrompt(project: {
+  allowedFilePatterns: string[];
+  contextInstructions: string | null;
+  startupCommands: string[];
+  requiredServices: string[];
+  devServerPort: number;
+}): string {
+  const parts = [
+    "You are an AI assistant helping a non-technical user make changes to their project.",
+    "The project is cloned at /workspace. Environment variables are in /workspace/.env.",
+    "",
+    "ENVIRONMENT:",
+    `- Dev server port: ${project.devServerPort}`,
+    `- Required services: ${project.requiredServices.length > 0 ? project.requiredServices.join(", ") : "none"}`,
+    `- Startup commands: ${project.startupCommands.length > 0 ? project.startupCommands.join(" && ") : "check package.json"}`,
+    "",
+    "RULES:",
+    "- Only modify files matching these patterns: " +
+      (project.allowedFilePatterns.length > 0
+        ? project.allowedFilePatterns.join(", ")
+        : "any file"),
+    "- Explain what you changed in simple, non-technical terms.",
+    "- Do NOT show code diffs or terminal output to the user.",
+    "- If something breaks, fix it before reporting back.",
+    "- Always commit your changes with clear commit messages.",
+    "- Keep the dev server running after making changes.",
+    "- You have bun, node, npm, git, postgresql, and redis available in this environment.",
+    "- The .env file may need to be copied to subdirectories (e.g. backend/) — check where the project expects it.",
+  ];
+
+  if (project.contextInstructions) {
+    parts.push("", "PROJECT CONTEXT:", project.contextInstructions);
+  }
+
+  return parts.join("\n");
+}
+
+export async function createSessionPR(sessionId: string, userId: string) {
+  const session = await prisma.session.findUniqueOrThrow({
+    where: { id: sessionId },
+    include: { project: true, user: true },
+  });
+
+  if (!session.sandboxId) throw new Error("No active sandbox");
+
+  await prisma.session.update({
+    where: { id: sessionId },
+    data: { status: "STOPPING" },
+  });
+
+  try {
+    // Push changes from sandbox
+    await pushChangesFromSandbox(
+      session.sandboxId,
+      session.branchName,
+      `Changes from Vendi session by ${session.user.name || session.user.email}`
+    );
+
+    // Create PR
+    const prUrl = await createPullRequest(
+      userId,
+      session.project.githubRepoFullName,
+      session.branchName,
+      session.project.defaultBranch,
+      `Vendi: Changes from session ${session.id.slice(0, 8)}`,
+      `Changes made via Vendi by ${session.user.name || session.user.email}.\n\nSession ID: ${session.id}`
+    );
+
+    // Stop sandbox
+    await stopSandbox(session.sandboxId);
+
+    // Update session
+    await prisma.session.update({
+      where: { id: sessionId },
+      data: {
+        status: "COMPLETED",
+        outcome: "PR_CREATED",
+        prUrl,
+        endedAt: new Date(),
+        sandboxId: null,
+      },
+    });
+
+    return { prUrl };
+  } catch (error) {
+    await prisma.session.update({
+      where: { id: sessionId },
+      data: { status: "ERRORED", endedAt: new Date() },
+    });
+    throw error;
+  }
+}
+
+export async function commitToMain(sessionId: string, userId: string) {
+  // Same as createSessionPR but also merges
+  const result = await createSessionPR(sessionId, userId);
+
+  const session = await prisma.session.findUniqueOrThrow({
+    where: { id: sessionId },
+    include: { project: true },
+  });
+
+  // Extract PR number from URL
+  const prNumber = parseInt(result.prUrl.split("/").pop()!, 10);
+
+  // Merge the PR
+  const sha = await mergePullRequest(
+    userId,
+    session.project.githubRepoFullName,
+    prNumber
+  );
+
+  // Clean up branch
+  await deleteBranch(userId, session.project.githubRepoFullName, session.branchName);
+
+  await prisma.session.update({
+    where: { id: sessionId },
+    data: { outcome: "COMMITTED_TO_MAIN", commitSha: sha },
+  });
+
+  return { prUrl: result.prUrl, commitSha: sha };
+}
+
+export async function discardSession(sessionId: string, userId: string) {
+  const session = await prisma.session.findUniqueOrThrow({
+    where: { id: sessionId },
+    include: { project: true },
+  });
+
+  if (session.sandboxId) {
+    await stopSandbox(session.sandboxId);
+  }
+
+  // Delete the remote branch
+  await deleteBranch(userId, session.project.githubRepoFullName, session.branchName).catch(
+    () => {}
+  );
+
+  await prisma.session.update({
+    where: { id: sessionId },
+    data: {
+      status: "COMPLETED",
+      outcome: "DISCARDED",
+      endedAt: new Date(),
+      sandboxId: null,
+    },
+  });
+}

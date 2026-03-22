@@ -1,0 +1,3 @@
+[install]
+# Use classic node_modules layout for tsc compatibility
+globalDir = "node_modules"

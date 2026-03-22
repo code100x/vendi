@@ -1,0 +1,21 @@
+{
+  "name": "vendi",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "turbo dev",
+    "build": "turbo build",
+    "lint": "turbo lint",
+    "typecheck": "turbo typecheck",
+    "db:generate": "bun run --filter server prisma generate",
+    "db:migrate": "bun run --filter server prisma migrate dev",
+    "db:push": "bun run --filter server prisma db push"
+  },
+  "devDependencies": {
+    "turbo": "^2.4.0",
+    "typescript": "^5.7.0"
+  }
+}

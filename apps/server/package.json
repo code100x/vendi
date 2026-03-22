@@ -1,0 +1,37 @@
+{
+  "name": "server",
+  "version": "0.0.1",
+  "private": true,
+  "scripts": {
+    "dev": "bun --watch src/index.ts",
+    "build": "bun build src/index.ts --outdir dist --target node",
+    "start": "bun dist/index.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@google/generative-ai": "^0.24.1",
+    "@lucia-auth/adapter-prisma": "^4.0.0",
+    "@octokit/rest": "^21.0.0",
+    "@openai/codex-sdk": "^0.116.0",
+    "@prisma/client": "^6.2.0",
+    "@vendi/shared": "workspace:*",
+    "arctic": "^2.2.0",
+    "cookie-parser": "^1.4.7",
+    "cors": "^2.8.5",
+    "e2b": "^2.14.1",
+    "express": "^4.21.0",
+    "express-rate-limit": "^7.4.0",
+    "lucia": "^3.2.0",
+    "nanoid": "^5.0.0",
+    "ws": "^8.18.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/ws": "^8.5.0",
+    "@types/cookie-parser": "^1.4.0",
+    "@types/cors": "^2.8.0",
+    "prisma": "^6.2.0",
+    "typescript": "^5.7.0"
+  }
+}
