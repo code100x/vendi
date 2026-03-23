@@ -17,6 +17,7 @@ import {
   Lock,
   Globe,
   Users,
+  RotateCcw,
 } from "lucide-react";
 
 function TemplateStatusBadge({ status }: { status: Project["templateStatus"] }) {
@@ -293,6 +294,10 @@ function ProjectCard({
   onStartSession: () => void;
   onConfigure: () => void;
 }) {
+  const navigate = useNavigate();
+  const queryClient = useQueryClient();
+  const [showReconfigureConfirm, setShowReconfigureConfirm] = useState(false);
+
   const { data: activeSessions } = useQuery({
     queryKey: ["orgs", orgId, "projects", project.id, "active-sessions"],
     queryFn: async () => {
@@ -304,50 +309,110 @@ function ProjectCard({
     refetchInterval: 30000,
   });
 
+  const reconfigure = useMutation({
+    mutationFn: async () => {
+      await api.post(`/orgs/${orgId}/projects/${project.id}/setup/reset`);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["orgs", orgId, "projects"] });
+      toast.success("Project reset. Starting fresh setup...");
+      navigate(`/orgs/${orgId}/projects/${project.id}/setup`);
+    },
+    onError: (err: any) => {
+      toast.error(err.response?.data?.error || "Failed to reset project");
+    },
+  });
+
   const activeCount = activeSessions?.length ?? 0;
   const isReady = project.templateStatus === "READY";
+  const isConfigured = project.templateStatus !== "PENDING";
 
   return (
-    <div className="rounded-xl border bg-white p-6 shadow-sm hover:shadow-md transition-shadow">
-      <div className="mb-4">
-        <h3 className="font-semibold text-gray-900 truncate">{project.name}</h3>
-        <p className="text-xs text-gray-400 mt-0.5 truncate">
-          {project.githubRepoFullName}
-        </p>
-      </div>
+    <>
+      <div className="rounded-xl border bg-white p-6 shadow-sm hover:shadow-md transition-shadow">
+        <div className="mb-4">
+          <h3 className="font-semibold text-gray-900 truncate">{project.name}</h3>
+          <p className="text-xs text-gray-400 mt-0.5 truncate">
+            {project.githubRepoFullName}
+          </p>
+        </div>
 
-      <div className="flex items-center gap-3 mb-6">
-        <TemplateStatusBadge status={project.templateStatus} />
-        {activeCount > 0 && (
-          <span className="inline-flex items-center gap-1 text-xs text-gray-500">
-            <Users className="h-3 w-3" />
-            {activeCount} active
-          </span>
-        )}
-      </div>
-
-      <div className="flex gap-2">
-        <button
-          onClick={onStartSession}
-          disabled={!isReady}
-          className={cn(
-            "flex-1 inline-flex items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium transition-colors",
-            isReady
-              ? "bg-gray-900 text-white hover:bg-gray-800"
-              : "bg-gray-100 text-gray-400 cursor-not-allowed"
+        <div className="flex items-center gap-3 mb-6">
+          <TemplateStatusBadge status={project.templateStatus} />
+          {activeCount > 0 && (
+            <span className="inline-flex items-center gap-1 text-xs text-gray-500">
+              <Users className="h-3 w-3" />
+              {activeCount} active
+            </span>
           )}
-        >
-          <Play className="h-3.5 w-3.5" />
-          Start Session
-        </button>
-        <button
-          onClick={onConfigure}
-          className="inline-flex items-center gap-1.5 rounded-lg border px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors"
-        >
-          <Settings className="h-3.5 w-3.5" />
-          Configure
-        </button>
+        </div>
+
+        <div className="flex gap-2">
+          <button
+            onClick={onStartSession}
+            disabled={!isReady}
+            className={cn(
+              "flex-1 inline-flex items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium transition-colors",
+              isReady
+                ? "bg-gray-900 text-white hover:bg-gray-800"
+                : "bg-gray-100 text-gray-400 cursor-not-allowed"
+            )}
+          >
+            <Play className="h-3.5 w-3.5" />
+            Start Session
+          </button>
+          <button
+            onClick={onConfigure}
+            className="inline-flex items-center gap-1.5 rounded-lg border px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors"
+          >
+            <Settings className="h-3.5 w-3.5" />
+            Configure
+          </button>
+          {isConfigured && (
+            <button
+              onClick={() => setShowReconfigureConfirm(true)}
+              title="Re-configure from scratch"
+              className="inline-flex items-center justify-center rounded-lg border px-2 py-2 text-sm text-gray-500 hover:bg-gray-50 hover:text-gray-700 transition-colors"
+            >
+              <RotateCcw className="h-3.5 w-3.5" />
+            </button>
+          )}
+        </div>
       </div>
-    </div>
+
+      {showReconfigureConfirm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+          <div className="w-full max-w-sm rounded-xl border bg-white p-6 shadow-xl">
+            <h3 className="text-lg font-semibold text-gray-900 mb-2">
+              Re-configure project?
+            </h3>
+            <p className="text-sm text-gray-500 mb-6">
+              This will clear all existing configuration (environment variables,
+              services, startup commands) and restart the setup from scratch.
+              The template will need to be rebuilt.
+            </p>
+            <div className="flex gap-3 justify-end">
+              <button
+                onClick={() => setShowReconfigureConfirm(false)}
+                className="rounded-lg border px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => {
+                  setShowReconfigureConfirm(false);
+                  reconfigure.mutate();
+                }}
+                disabled={reconfigure.isPending}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700 transition-colors disabled:opacity-50"
+              >
+                {reconfigure.isPending && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                Re-configure
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
   );
 }

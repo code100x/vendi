@@ -1,4 +1,5 @@
 import { Sandbox } from "e2b";
+import { Prisma } from "@prisma/client";
 import { prisma } from "../lib/prisma";
 import { decrypt, encrypt } from "../lib/crypto";
 import { env } from "../config/env";
@@ -509,12 +510,24 @@ export async function resetSetup(projectId: string): Promise<void> {
   await prisma.project.update({
     where: { id: projectId },
     data: {
-      setupMessages: null,
-      setupToolCalls: null,
-      setupLlmHistory: null,
+      // Clear setup chat state
+      setupMessages: Prisma.DbNull,
+      setupToolCalls: Prisma.DbNull,
+      setupLlmHistory: Prisma.DbNull,
       setupStatus: "",
       setupIsProcessing: false,
       setupSandboxId: null,
+      // Clear project configuration so setup starts fresh
+      envVars: null,
+      envVarsIv: null,
+      contextInstructions: null,
+      startupCommands: [],
+      requiredServices: [],
+      allowedFilePatterns: [],
+      devServerPort: 3000,
+      e2bTemplateId: null,
+      templateStatus: "PENDING",
+      templateBuildLog: null,
     },
   });
 }
