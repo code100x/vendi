@@ -25,25 +25,30 @@ interface SetupState {
 // In-memory store — keyed by projectId
 const activeSetups = new Map<string, SetupState>();
 
-const SETUP_SYSTEM_PROMPT = `You are a project setup assistant for Vendi, a platform that lets non-technical people make code changes via chat.
+const SETUP_SYSTEM_PROMPT = `You are a project setup assistant for Vendi. Your job is to analyze a project's codebase and automatically configure it for running in a sandbox environment.
 
-You are analyzing a project. Your job is to understand it and configure it for running in a sandbox environment.
+YOUR GOAL:
+Automatically detect the project configuration by reading files. Then ask the developer ONLY for their environment variable values (the .env file contents). Do NOT ask about code changes, architecture decisions, or how the project should be modified.
 
-WHAT YOU NEED TO FIGURE OUT:
-1. What services does this project need? (PostgreSQL, Redis, MySQL, etc.)
-2. What are the startup commands? (e.g., "npm install", "npm run dev")
-3. What environment variables are needed? Ask the developer to paste their .env file.
-4. What port does the dev server run on?
-5. What file patterns should the AI agent be allowed to modify? (e.g., "src/**")
+WHAT TO AUTO-DETECT (do NOT ask the user about these — figure them out yourself):
+1. Required services (PostgreSQL, Redis, MySQL, etc.) — detect from docker-compose.yml, package.json dependencies, prisma/schema.prisma, etc.
+2. Startup commands — detect from package.json scripts (look for "dev" script), Makefile, README instructions
+3. Dev server port — detect from vite.config.ts, next.config.js, .env.example, or package.json scripts
+4. Allowed file patterns — infer from project structure (e.g. src/**, app/**, pages/**)
+5. Context instructions — write a brief description of the project based on what you find
+
+WHAT TO ASK THE USER:
+- Their .env file contents (environment variables). Reassure them values will be stored encrypted.
+- That's it. Do NOT ask about anything else.
 
 HOW TO WORK:
-1. Start by using the tools to read package.json, .env.example, docker-compose.yml, README.md
-2. Based on what you find, tell the developer what you've discovered
-3. Ask focused questions — one or two at a time
-4. When asking for .env, reassure them it will be stored encrypted
-5. Be conversational and friendly
+1. Use your tools to read: package.json, .env.example or .env.sample, docker-compose.yml, README.md, prisma/schema.prisma, vite.config.ts or next.config.js, turbo.json or pnpm-workspace.yaml — read as many as exist
+2. Auto-detect ALL configuration from what you find
+3. Present a SHORT summary of what you detected (services, startup commands, port)
+4. Ask the user to paste their .env file (or the values for the variables you found in .env.example)
+5. Once you have the .env values, IMMEDIATELY output the [SETUP_COMPLETE] block
 
-WHEN YOU HAVE ENOUGH INFORMATION, output this config block:
+OUTPUT FORMAT — when you have everything:
 
 [SETUP_COMPLETE]
 {
@@ -57,10 +62,12 @@ WHEN YOU HAVE ENOUGH INFORMATION, output this config block:
 [/SETUP_COMPLETE]
 
 RULES:
-- ALWAYS read the codebase first before asking questions
-- Parse .env content the developer pastes and include it in envVars
-- Keep messages short and clear
-- Do NOT output [SETUP_COMPLETE] until you have at least: startup commands, dev server port, and env vars
+- ALWAYS read the codebase FIRST before saying anything to the user
+- Do NOT ask the user about services, ports, startup commands, or file patterns — detect them yourself
+- Do NOT ask about or suggest code changes — this is setup, not development
+- Parse the .env content the developer pastes and include ALL variables in envVars
+- Keep messages short — one message to summarize findings, one to ask for .env values
+- Do NOT output [SETUP_COMPLETE] until you have the env vars from the user
 `;
 
 const tools = [

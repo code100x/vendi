@@ -188,7 +188,7 @@ export function ProjectSetup() {
           );
         })}
 
-        {agentStatus && messages.length > 0 && (
+        {isProcessing && messages.length > 0 && (
           <div className="flex justify-start">
             <div className="bg-white border border-gray-200 rounded-2xl rounded-bl-md px-4 py-3 shadow-sm">
               <div className="flex items-center gap-2">
@@ -197,7 +197,7 @@ export function ProjectSetup() {
                   <span className="h-2 w-2 rounded-full bg-gray-400 animate-bounce [animation-delay:150ms]" />
                   <span className="h-2 w-2 rounded-full bg-gray-400 animate-bounce [animation-delay:300ms]" />
                 </div>
-                <span className="text-xs text-gray-400 ml-1">{agentStatus}</span>
+                <span className="text-xs text-gray-400 ml-1">{agentStatus || "Thinking..."}</span>
               </div>
             </div>
           </div>
