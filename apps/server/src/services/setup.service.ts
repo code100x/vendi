@@ -14,10 +14,19 @@ interface ChatMsg {
   createdAt: string;
 }
 
+interface ToolCallEntry {
+  id: string;
+  name: string;
+  args: Record<string, string>;
+  result: string;
+  timestamp: string;
+}
+
 interface SetupState {
   sandbox: Sandbox;
   llmMessages: any[];
   chatMessages: ChatMsg[];
+  toolCalls: ToolCallEntry[];
   status: string;
   isProcessing: boolean;
 }
@@ -151,6 +160,13 @@ async function runAgentLoop(state: SetupState): Promise<string> {
         let args: Record<string, string>;
         try { args = JSON.parse(argsStr); } catch { args = {}; }
         const result = await executeTool(state.sandbox, name, args);
+        state.toolCalls.push({
+          id: crypto.randomUUID(),
+          name,
+          args,
+          result: result.slice(0, 2000),
+          timestamp: new Date().toISOString(),
+        });
         state.llmMessages.push({ role: "tool", tool_call_id: tc.id, content: result });
       }
       continue;
@@ -189,6 +205,7 @@ export async function startSetupSession(projectId: string, userId: string): Prom
     sandbox: null as any,
     llmMessages: [{ role: "system", content: SETUP_SYSTEM_PROMPT }],
     chatMessages: [],
+    toolCalls: [],
     status: "Creating sandbox...",
     isProcessing: true,
   };
@@ -285,10 +302,10 @@ async function handlePossibleCompletion(projectId: string, state: SetupState, re
 }
 
 // Poll endpoint returns current state
-export function getSetupState(projectId: string): { messages: ChatMsg[]; status: string; isProcessing: boolean } | null {
+export function getSetupState(projectId: string): { messages: ChatMsg[]; toolCalls: ToolCallEntry[]; status: string; isProcessing: boolean } | null {
   const state = activeSetups.get(projectId);
   if (!state) return null;
-  return { messages: state.chatMessages, status: state.status, isProcessing: state.isProcessing };
+  return { messages: state.chatMessages, toolCalls: state.toolCalls, status: state.status, isProcessing: state.isProcessing };
 }
 
 export function isSetupActive(projectId: string): boolean {

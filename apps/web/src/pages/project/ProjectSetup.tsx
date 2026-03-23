@@ -11,6 +11,11 @@ import {
   Loader2,
   Bot,
   CheckCircle2,
+  ChevronDown,
+  FileText,
+  FolderOpen,
+  Search,
+  Terminal,
 } from "lucide-react";
 
 interface SetupMsg {
@@ -20,12 +25,28 @@ interface SetupMsg {
   createdAt: string;
 }
 
+interface ToolCallEntry {
+  id: string;
+  name: string;
+  args: Record<string, string>;
+  result: string;
+  timestamp: string;
+}
+
 interface SetupState {
   active: boolean;
   messages: SetupMsg[];
+  toolCalls: ToolCallEntry[];
   status: string;
   isProcessing: boolean;
 }
+
+const TOOL_META: Record<string, { icon: typeof FileText; label: string; argKey: string }> = {
+  read_file: { icon: FileText, label: "Read", argKey: "path" },
+  list_files: { icon: FolderOpen, label: "List", argKey: "path" },
+  search_code: { icon: Search, label: "Search", argKey: "pattern" },
+  run_command: { icon: Terminal, label: "Run", argKey: "command" },
+};
 
 export function ProjectSetup() {
   const { orgId, projectId } = useParams<{ orgId: string; projectId: string }>();
@@ -35,10 +56,13 @@ export function ProjectSetup() {
   const setupTriggeredRef = useRef(false);
 
   const [messages, setMessages] = useState<SetupMsg[]>([]);
+  const [toolCalls, setToolCalls] = useState<ToolCallEntry[]>([]);
   const [input, setInput] = useState("");
   const [agentStatus, setAgentStatus] = useState("");
   const [isProcessing, setIsProcessing] = useState(false);
   const [setupComplete, setSetupComplete] = useState(false);
+  const [toolsExpanded, setToolsExpanded] = useState(false);
+  const [expandedToolId, setExpandedToolId] = useState<string | null>(null);
 
   // Fetch project details
   const { data: project } = useQuery({
@@ -61,19 +85,36 @@ export function ProjectSetup() {
     });
   }, [orgId, projectId]);
 
-  // Poll for state every second
+  // Poll for state every second (with overlap protection)
+  const pollInFlight = useRef(false);
   useEffect(() => {
     if (!orgId || !projectId || setupComplete) return;
 
     const interval = setInterval(async () => {
+      if (pollInFlight.current) return;
+      pollInFlight.current = true;
       try {
         const { data } = await api.get<SetupState>(
           `/orgs/${orgId}/projects/${projectId}/setup/state`
         );
 
-        if (data.messages.length > 0) {
-          setMessages(data.messages);
-        }
+        // Only update state when data actually changes to avoid re-renders / scroll stutter
+        setMessages((prev) => {
+          if (data.messages.length === prev.length) return prev;
+          // Keep existing object references stable, append only new ones
+          if (data.messages.length > prev.length) {
+            return [...prev, ...data.messages.slice(prev.length)];
+          }
+          return data.messages;
+        });
+        setToolCalls((prev) => {
+          const incoming = data.toolCalls ?? [];
+          if (incoming.length === prev.length) return prev;
+          if (incoming.length > prev.length) {
+            return [...prev, ...incoming.slice(prev.length)];
+          }
+          return incoming;
+        });
         setAgentStatus(data.status || "");
         setIsProcessing(data.isProcessing);
 
@@ -86,6 +127,8 @@ export function ProjectSetup() {
         }
       } catch {
         // ignore polling errors
+      } finally {
+        pollInFlight.current = false;
       }
     }, 1000);
 
@@ -117,6 +160,9 @@ export function ProjectSetup() {
       .catch((err) => toast.error("Failed to send message"));
 
     setInput("");
+    setToolCalls([]);
+    setToolsExpanded(false);
+    setExpandedToolId(null);
     if (textareaRef.current) textareaRef.current.style.height = "auto";
   }, [input, isProcessing, setupComplete, orgId, projectId]);
 
@@ -190,15 +236,69 @@ export function ProjectSetup() {
 
         {isProcessing && messages.length > 0 && (
           <div className="flex justify-start">
-            <div className="bg-white border border-gray-200 rounded-2xl rounded-bl-md px-4 py-3 shadow-sm">
-              <div className="flex items-center gap-2">
+            <div className="bg-white border border-gray-200 rounded-2xl rounded-bl-md shadow-sm overflow-hidden">
+              {/* Clickable header */}
+              <button
+                onClick={() => setToolsExpanded((v) => !v)}
+                className="flex items-center gap-2 px-4 py-3 w-full hover:bg-gray-50 transition-colors"
+              >
                 <div className="flex gap-1">
                   <span className="h-2 w-2 rounded-full bg-gray-400 animate-bounce [animation-delay:0ms]" />
                   <span className="h-2 w-2 rounded-full bg-gray-400 animate-bounce [animation-delay:150ms]" />
                   <span className="h-2 w-2 rounded-full bg-gray-400 animate-bounce [animation-delay:300ms]" />
                 </div>
                 <span className="text-xs text-gray-400 ml-1">{agentStatus || "Thinking..."}</span>
-              </div>
+                {toolCalls.length > 0 && (
+                  <>
+                    <span className="text-xs text-gray-300 ml-auto tabular-nums">
+                      {toolCalls.length} {toolCalls.length === 1 ? "call" : "calls"}
+                    </span>
+                    <ChevronDown
+                      className={cn(
+                        "h-3 w-3 text-gray-300 transition-transform",
+                        toolsExpanded && "rotate-180"
+                      )}
+                    />
+                  </>
+                )}
+              </button>
+
+              {/* Expanded tool calls */}
+              {toolsExpanded && toolCalls.length > 0 && (
+                <div className="border-t border-gray-100 max-h-64 overflow-y-auto">
+                  {toolCalls.map((tc) => {
+                    const meta = TOOL_META[tc.name] || { icon: Terminal, label: tc.name, argKey: "" };
+                    const Icon = meta.icon;
+                    const argValue = meta.argKey ? tc.args[meta.argKey] : JSON.stringify(tc.args);
+                    const isExpanded = expandedToolId === tc.id;
+
+                    return (
+                      <div key={tc.id} className="border-b border-gray-50 last:border-0">
+                        <button
+                          onClick={() => setExpandedToolId(isExpanded ? null : tc.id)}
+                          className="flex items-center gap-2 px-4 py-2 w-full text-left hover:bg-gray-50 transition-colors"
+                        >
+                          <Icon className="h-3.5 w-3.5 text-gray-400 shrink-0" />
+                          <span className="text-xs text-gray-600 truncate flex-1 font-mono">
+                            {argValue}
+                          </span>
+                          <ChevronDown
+                            className={cn(
+                              "h-3 w-3 text-gray-300 shrink-0 transition-transform",
+                              isExpanded && "rotate-180"
+                            )}
+                          />
+                        </button>
+                        {isExpanded && (
+                          <pre className="px-4 py-2 bg-gray-50 text-[11px] text-gray-500 overflow-x-auto max-h-40 font-mono whitespace-pre-wrap break-all">
+                            {tc.result}
+                          </pre>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           </div>
         )}
