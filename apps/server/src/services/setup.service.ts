@@ -148,6 +148,9 @@ async function executeTool(sandbox: Sandbox, name: string, args: Record<string, 
   }
 }
 
+let setupTokensIn = 0;
+let setupTokensOut = 0;
+
 async function callLLM(messages: any[]): Promise<any> {
   const { url, key, model } = getLLMConfig();
   const res = await fetch(url, {
@@ -160,7 +163,13 @@ async function callLLM(messages: any[]): Promise<any> {
     body: JSON.stringify({ model, messages, tools, max_tokens: 4096 }),
   });
   if (!res.ok) throw new Error(`LLM error ${res.status}: ${await res.text()}`);
-  return res.json();
+  const json = await res.json();
+  const usage = json?.usage;
+  if (usage) {
+    setupTokensIn += usage.prompt_tokens || 0;
+    setupTokensOut += usage.completion_tokens || 0;
+  }
+  return json;
 }
 
 // ── DB persistence helpers ──────────────────────────────────────────────────
@@ -219,7 +228,7 @@ interface LoopContext {
 
 async function runAgentLoop(ctx: LoopContext): Promise<string> {
   let iterations = 0;
-  while (iterations < 30) {
+  while (iterations < 20) {
     iterations++;
     console.log(`[Setup] LLM iteration ${iterations}`);
 
@@ -364,6 +373,9 @@ export async function startSetupSession(projectId: string, userId: string): Prom
       });
 
       await handlePossibleCompletion(projectId, ctx.chatMessages, response);
+
+      const costUsd = (setupTokensIn / 1_000_000) * 2.0 + (setupTokensOut / 1_000_000) * 8.0;
+      console.log(`[Setup] Project ${projectId} setup cost: $${costUsd.toFixed(4)} (${setupTokensIn} in / ${setupTokensOut} out)`);
 
       await persistState(projectId, {
         messages: ctx.chatMessages,

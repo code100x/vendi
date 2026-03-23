@@ -2,6 +2,7 @@ import { Sandbox } from "e2b";
 import { prisma } from "../lib/prisma";
 import { env } from "../config/env";
 import { getAgentScript } from "./agent-script";
+import { broadcastToRoom } from "../ws/rooms";
 import type { ToolCallEntry } from "@vendi/shared";
 
 const VENDI_DIR = "/workspace/.vendi";
@@ -73,7 +74,7 @@ export async function startAgentTurn(config: StartAgentConfig): Promise<void> {
     ...llmConfig,
     systemPrompt,
     messages: history,
-    maxIterations: 50,
+    maxIterations: 25,
   };
   await sandbox.files.write(CONFIG_PATH, JSON.stringify(agentConfig));
 
@@ -117,6 +118,10 @@ interface LogEntry {
   timestamp?: string;
   content?: string;
   filesChanged?: string[];
+  tokensIn?: number;
+  tokensOut?: number;
+  costUsd?: number;
+  iterations?: number;
 }
 
 function parseLogFile(content: string): LogEntry[] {
@@ -222,11 +227,39 @@ export async function syncAgentProgress(sessionId: string): Promise<void> {
       },
     });
 
-    // Clear agent run tracking
-    await prisma.session.update({
+    // Update session cost tracking from agent-reported usage
+    const turnTokensIn = doneEntry?.tokensIn || 0;
+    const turnTokensOut = doneEntry?.tokensOut || 0;
+    const turnCostUsd = doneEntry?.costUsd || 0;
+
+    if (turnTokensIn > 0 || turnTokensOut > 0) {
+      console.log(
+        `[Agent] Session ${sessionId} turn cost: $${turnCostUsd.toFixed(4)} (${turnTokensIn} in / ${turnTokensOut} out, ${doneEntry?.iterations || "?"} iterations)`
+      );
+    }
+
+    const updatedSession = await prisma.session.update({
       where: { id: sessionId },
-      data: { agentRunId: null, agentWorkingMsgId: null, agentRunStartedAt: null },
+      data: {
+        agentRunId: null,
+        agentWorkingMsgId: null,
+        agentRunStartedAt: null,
+        totalTokensIn: { increment: turnTokensIn },
+        totalTokensOut: { increment: turnTokensOut },
+        totalCostUsd: { increment: turnCostUsd },
+      },
     });
+
+    // Broadcast cost update to connected clients
+    if (turnCostUsd > 0) {
+      broadcastToRoom(sessionId, {
+        type: "cost_update",
+        sessionId,
+        totalCostUsd: updatedSession.totalCostUsd,
+        totalTokensIn: updatedSession.totalTokensIn,
+        totalTokensOut: updatedSession.totalTokensOut,
+      });
+    }
   } else if (session.agentWorkingMsgId && toolCalls.length > 0) {
     // Agent still running — update working message with live tool calls
     const latestTool = toolCalls[toolCalls.length - 1];

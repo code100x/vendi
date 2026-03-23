@@ -12,6 +12,26 @@ const CONFIG_PATH = "/workspace/.vendi/agent-config.json";
 const LOG_PATH = "/workspace/.vendi/agent-log.jsonl";
 const MAX_COMMAND_TIMEOUT_MS = 60_000;
 
+// Cost tracking — gpt-4.1 pricing ($/1M tokens)
+const COST_PER_1M_INPUT = 2.00;
+const COST_PER_1M_OUTPUT = 8.00;
+const MAX_COST_PER_TURN_USD = 2.00;
+
+let totalTokensIn = 0;
+let totalTokensOut = 0;
+let totalCostUsd = 0;
+
+function trackUsage(data) {
+  const usage = data?.usage;
+  if (!usage) return;
+  const tokIn = usage.prompt_tokens || 0;
+  const tokOut = usage.completion_tokens || 0;
+  totalTokensIn += tokIn;
+  totalTokensOut += tokOut;
+  totalCostUsd = (totalTokensIn / 1_000_000) * COST_PER_1M_INPUT
+               + (totalTokensOut / 1_000_000) * COST_PER_1M_OUTPUT;
+}
+
 // ── Load config ──────────────────────────────────────────────────────────────
 
 const config = JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8"));
@@ -112,7 +132,9 @@ async function callLLM(msgs) {
       signal: controller.signal,
     });
     if (!res.ok) throw new Error(\`LLM error \${res.status}: \${await res.text()}\`);
-    return res.json();
+    const json = await res.json();
+    trackUsage(json);
+    return json;
   } finally {
     clearTimeout(timeout);
   }
@@ -129,8 +151,15 @@ async function main() {
   let iterations = 0;
   let finalText = "";
 
-  while (iterations < (maxIterations || 50)) {
+  const iterLimit = maxIterations || 25;
+  while (iterations < iterLimit) {
     iterations++;
+
+    // Cost guard — stop if this turn is getting too expensive
+    if (totalCostUsd >= MAX_COST_PER_TURN_USD) {
+      appendLog({ type: "tool_call", id: randomUUID(), name: "_cost_limit", args: { costUsd: totalCostUsd.toFixed(4), tokensIn: totalTokensIn, tokensOut: totalTokensOut }, result: "Cost limit reached, wrapping up.", timestamp: new Date().toISOString() });
+      break;
+    }
 
     const data = await callLLM(llmMessages);
     const msg = data.choices?.[0]?.message;
@@ -164,7 +193,7 @@ async function main() {
     break;
   }
 
-  if (!finalText && iterations >= (maxIterations || 50)) {
+  if (!finalText && iterations >= iterLimit) {
     llmMessages.push({
       role: "user",
       content: "You've used many tool calls. Please summarize what you've done and the current state.",
@@ -180,11 +209,15 @@ async function main() {
     filesChanged = out.split("\\n").map(l => l.trim()).filter(Boolean).map(l => l.slice(3).trim()).filter(Boolean).slice(0, 50);
   } catch {}
 
-  // Write done marker
+  // Write done marker with token/cost data
   appendLog({
     type: "done",
     content: finalText || "Done.",
     filesChanged,
+    tokensIn: totalTokensIn,
+    tokensOut: totalTokensOut,
+    costUsd: totalCostUsd,
+    iterations,
   });
 }
 
