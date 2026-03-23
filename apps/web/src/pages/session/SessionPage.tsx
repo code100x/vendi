@@ -125,30 +125,40 @@ function ChatBubble({ message }: { message: ChatMessage }) {
   const toolCalls = message.metadata?.toolCalls;
 
   if (message.role === "SYSTEM") {
-    const isWorking = message.content.includes("working on it");
+    const isWorking = message.content.includes("working on it") || message.content.includes("Setting up your project");
     const systemToolCalls = toolCalls;
+    const hasToolCalls = systemToolCalls && systemToolCalls.length > 0;
 
-    // If it's the "working" message with live tool calls, show expanded view
-    if (isWorking && systemToolCalls && systemToolCalls.length > 0) {
+    // "Working" messages always get the enhanced UI with bouncing dots
+    if (isWorking) {
       return (
         <div className="flex justify-start my-3">
           <div className="max-w-[80%] bg-white border border-gray-200 rounded-2xl rounded-bl-md shadow-sm overflow-hidden">
             <button
-              onClick={() => setToolsExpanded((v) => !v)}
-              className="flex items-center gap-2 px-4 py-3 w-full hover:bg-gray-50 transition-colors"
+              onClick={() => hasToolCalls && setToolsExpanded((v) => !v)}
+              className={cn(
+                "flex items-center gap-2 px-4 py-3 w-full transition-colors",
+                hasToolCalls && "hover:bg-gray-50 cursor-pointer"
+              )}
             >
               <div className="flex gap-1">
                 <span className="h-2 w-2 rounded-full bg-gray-400 animate-bounce [animation-delay:0ms]" />
                 <span className="h-2 w-2 rounded-full bg-gray-400 animate-bounce [animation-delay:150ms]" />
                 <span className="h-2 w-2 rounded-full bg-gray-400 animate-bounce [animation-delay:300ms]" />
               </div>
-              <span className="text-xs text-gray-400 ml-1">Codex is working...</span>
-              <span className="text-xs text-gray-300 ml-auto tabular-nums">
-                {systemToolCalls.length} {systemToolCalls.length === 1 ? "call" : "calls"}
+              <span className="text-xs text-gray-400 ml-1">
+                {message.content.includes("Setting up") ? "Setting up project..." : "Codex is working..."}
               </span>
-              <ChevronDown className={cn("h-3 w-3 text-gray-300 transition-transform", toolsExpanded && "rotate-180")} />
+              {hasToolCalls && (
+                <>
+                  <span className="text-xs text-gray-300 ml-auto tabular-nums">
+                    {systemToolCalls.length} {systemToolCalls.length === 1 ? "call" : "calls"}
+                  </span>
+                  <ChevronDown className={cn("h-3 w-3 text-gray-300 transition-transform", toolsExpanded && "rotate-180")} />
+                </>
+              )}
             </button>
-            {toolsExpanded && (
+            {toolsExpanded && hasToolCalls && (
               <div className="border-t border-gray-100 max-h-64 overflow-y-auto">
                 {systemToolCalls.map((tc) => (
                   <ToolCallRow

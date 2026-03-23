@@ -273,13 +273,13 @@ async function runCodexCommand(
     "-",
   ];
 
-  // Pipe stdout to a log file so we can poll it for live progress
-  // stdbuf -oL forces line buffering so each JSON event flushes immediately
+  // Redirect stdout to log file so we can poll it for live progress.
+  // Direct redirect avoids pipe buffering issues entirely.
   const command =
     `cd /workspace && ` +
     `OPENAI_API_KEY=${shellEscape(env.OPENAI_API_KEY || "")} ` +
     `HOME=${shellEscape(CODEX_HOME_DIR)} ` +
-    `stdbuf -oL ${baseArgs.map(shellEscape).join(" ")} < ${shellEscape(promptPath)} | tee ${shellEscape(logPath)}`;
+    `${baseArgs.map(shellEscape).join(" ")} < ${shellEscape(promptPath)} > ${shellEscape(logPath)} 2>&1`;
   try {
     const result = await sandbox.commands.run(command, {
       requestTimeoutMs: 20 * 60 * 1000,
@@ -394,9 +394,9 @@ export async function runAgentTurn(config: AgentRunConfig): Promise<void> {
 
   const finalMessage = (await readIfExists(sandbox, outputPath)).trim();
   const changedFiles = await listChangedFiles(sandbox);
-  // Read from log file for final parsing (tee pipes stdout to file)
+  // Read from log file (stdout was redirected there)
   const logContent = await readIfExists(sandbox, result.logPath);
-  const toolCalls = parseCodexToolCalls(logContent || result?.stdout || "");
+  const toolCalls = parseCodexToolCalls(logContent);
 
   if (result.exitCode === 0) {
     await sandbox.files.write(MODEL_FILE, chosenModel);
@@ -415,14 +415,14 @@ export async function runAgentTurn(config: AgentRunConfig): Promise<void> {
         sessionId,
         role: "ASSISTANT",
         content: finalMessage || "Done.",
-        rawContent: result.stdout || null,
+        rawContent: logContent || null,
         metadata,
       },
     });
     return;
   }
 
-  const failureDetails = [result.stderr, result.stdout].find(Boolean)?.trim() || "Codex exited without a response.";
+  const failureDetails = [logContent, result.stderr, result.stdout].find(Boolean)?.trim() || "Codex exited without a response.";
 
   if (failureDetails.includes("responses_websocket")) {
     const diagnosis = await diagnoseOpenAIFailure();
