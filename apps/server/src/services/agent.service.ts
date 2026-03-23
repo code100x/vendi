@@ -1,146 +1,26 @@
-import { randomUUID } from "node:crypto";
 import { Sandbox } from "e2b";
 import { prisma } from "../lib/prisma";
 import { env } from "../config/env";
+import { getAgentScript } from "./agent-script";
 import type { ToolCallEntry } from "@vendi/shared";
 
-const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
-const MODEL = "anthropic/claude-sonnet-4";
-const MAX_ITERATIONS = 50;
+const VENDI_DIR = "/workspace/.vendi";
+const CONFIG_PATH = `${VENDI_DIR}/agent-config.json`;
+const SCRIPT_PATH = `${VENDI_DIR}/agent.mjs`;
+const LOG_PATH = `${VENDI_DIR}/agent-log.jsonl`;
 
-interface AgentRunConfig {
+const AGENT_STALE_MS = 60 * 60 * 1000; // 1 hour safety valve
+
+interface StartAgentConfig {
   sessionId: string;
   sandboxId: string;
   userMessage: string;
   systemPrompt: string;
-  maxBudgetUsd: number;
 }
 
-// ── Tool definitions (OpenAI function-calling format) ─────────────────────────
+// ── Start agent turn (non-blocking) ──────────────────────────────────────────
 
-const tools = [
-  {
-    type: "function" as const,
-    function: {
-      name: "read_file",
-      description: "Read a file from the project",
-      parameters: { type: "object", properties: { path: { type: "string", description: "Absolute path to the file" } }, required: ["path"] },
-    },
-  },
-  {
-    type: "function" as const,
-    function: {
-      name: "write_file",
-      description: "Write or create a file in the project",
-      parameters: {
-        type: "object",
-        properties: {
-          path: { type: "string", description: "Absolute path to the file" },
-          content: { type: "string", description: "Full file content to write" },
-        },
-        required: ["path", "content"],
-      },
-    },
-  },
-  {
-    type: "function" as const,
-    function: {
-      name: "list_files",
-      description: "List files in a directory (up to 3 levels deep, max 80 entries)",
-      parameters: { type: "object", properties: { path: { type: "string", description: "Directory path" } }, required: ["path"] },
-    },
-  },
-  {
-    type: "function" as const,
-    function: {
-      name: "search_code",
-      description: "Search for a regex pattern across project source files",
-      parameters: { type: "object", properties: { pattern: { type: "string", description: "Grep-compatible regex pattern" } }, required: ["pattern"] },
-    },
-  },
-  {
-    type: "function" as const,
-    function: {
-      name: "run_command",
-      description: "Run a shell command in /workspace (60s timeout)",
-      parameters: { type: "object", properties: { command: { type: "string", description: "Shell command to execute" } }, required: ["command"] },
-    },
-  },
-];
-
-// ── Tool execution ────────────────────────────────────────────────────────────
-
-async function executeTool(sandbox: Sandbox, name: string, args: Record<string, string>): Promise<string> {
-  try {
-    switch (name) {
-      case "read_file":
-        return String(await sandbox.files.read(args.path));
-      case "write_file":
-        await sandbox.files.write(args.path, args.content);
-        return "File written successfully.";
-      case "list_files": {
-        const r = await sandbox.commands.run(
-          `find ${args.path} -maxdepth 3 -type f 2>/dev/null | head -80`,
-          { requestTimeoutMs: 10_000 },
-        );
-        return r.stdout || "No files found";
-      }
-      case "search_code": {
-        const escaped = args.pattern.replace(/"/g, '\\"');
-        const r = await sandbox.commands.run(
-          `cd /workspace && grep -rn "${escaped}" --include="*.ts" --include="*.tsx" --include="*.js" --include="*.jsx" --include="*.json" --include="*.css" --include="*.html" --include="*.env*" --include="*.yml" --include="*.yaml" --include="*.md" --include="*.prisma" 2>/dev/null | head -50`,
-          { requestTimeoutMs: 10_000 },
-        );
-        return r.stdout || "No matches";
-      }
-      case "run_command": {
-        const r = await sandbox.commands.run(`cd /workspace && ${args.command}`, {
-          requestTimeoutMs: 60_000,
-        });
-        const out = (r.stdout + (r.stderr ? "\n" + r.stderr : "")).trim();
-        return (out || `Exit code: ${r.exitCode}`).slice(0, 4000);
-      }
-      default:
-        return "Unknown tool";
-    }
-  } catch (e) {
-    return `Error: ${e instanceof Error ? e.message : String(e)}`;
-  }
-}
-
-// ── LLM call ──────────────────────────────────────────────────────────────────
-
-async function callLLM(messages: any[]): Promise<any> {
-  const res = await fetch(OPENROUTER_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${env.OPENROUTER_API_KEY}`,
-      "X-Title": "Vendi",
-    },
-    body: JSON.stringify({ model: MODEL, messages, tools, max_tokens: 4096 }),
-  });
-  if (!res.ok) throw new Error(`OpenRouter error ${res.status}: ${await res.text()}`);
-  return res.json();
-}
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-async function listChangedFiles(sandbox: Sandbox): Promise<string[]> {
-  const result = await sandbox.commands.run("cd /workspace && git status --porcelain", {
-    requestTimeoutMs: 10_000,
-  });
-  if (!result.stdout) return [];
-  return result.stdout
-    .split("\n")
-    .map((line: string) => line.trim())
-    .filter(Boolean)
-    .map((line: string) => line.slice(3).trim())
-    .filter(Boolean)
-    .slice(0, 50);
-}
-
-/** Load previous chat messages and convert to LLM message format */
+/** Load previous chat messages and convert to LLM format */
 async function buildConversationHistory(sessionId: string): Promise<any[]> {
   const messages = await prisma.chatMessage.findMany({
     where: { sessionId },
@@ -154,29 +34,38 @@ async function buildConversationHistory(sessionId: string): Promise<any[]> {
     } else if (msg.role === "ASSISTANT") {
       history.push({ role: "assistant", content: msg.content });
     }
-    // Skip SYSTEM messages (UI-only status messages)
   }
   return history;
 }
 
-// ── Main agent loop ───────────────────────────────────────────────────────────
-
-export async function runAgentTurn(config: AgentRunConfig): Promise<void> {
+export async function startAgentTurn(config: StartAgentConfig): Promise<void> {
   const { sessionId, sandboxId, userMessage, systemPrompt } = config;
 
   if (!env.OPENROUTER_API_KEY) throw new Error("OPENROUTER_API_KEY not set");
 
   const sandbox = await Sandbox.connect(sandboxId);
 
-  // Build LLM conversation: system prompt + history + current message
-  const conversationHistory = await buildConversationHistory(sessionId);
-  const llmMessages: any[] = [
-    { role: "system", content: systemPrompt },
-    ...conversationHistory,
-    { role: "user", content: userMessage },
-  ];
+  // Ensure state directory exists
+  await sandbox.commands.run(`mkdir -p ${VENDI_DIR}`, { requestTimeoutMs: 5_000 });
 
-  // Create "working" placeholder visible to frontend
+  // Build conversation history from DB
+  const history = await buildConversationHistory(sessionId);
+  history.push({ role: "user", content: userMessage });
+
+  // Write config for the agent script
+  const agentConfig = {
+    openrouterApiKey: env.OPENROUTER_API_KEY,
+    model: "anthropic/claude-sonnet-4",
+    systemPrompt,
+    messages: history,
+    maxIterations: 50,
+  };
+  await sandbox.files.write(CONFIG_PATH, JSON.stringify(agentConfig));
+
+  // Write the agent script
+  await sandbox.files.write(SCRIPT_PATH, getAgentScript());
+
+  // Create working message visible to frontend
   const workingMsg = await prisma.chatMessage.create({
     data: {
       sessionId,
@@ -185,126 +74,185 @@ export async function runAgentTurn(config: AgentRunConfig): Promise<void> {
     },
   });
 
-  const allToolCalls: ToolCallEntry[] = [];
+  // Track the agent run in DB (for cross-pod sync + safety valve)
+  await prisma.session.update({
+    where: { id: sessionId },
+    data: {
+      agentRunId: `run-${Date.now()}`,
+      agentWorkingMsgId: workingMsg.id,
+      agentRunStartedAt: new Date(),
+    },
+  });
 
-  try {
-    let iterations = 0;
-    let finalText = "";
+  // Start agent as background process in sandbox
+  await sandbox.commands.run(`node ${SCRIPT_PATH} > /dev/null 2>&1 &`, {
+    background: true,
+    requestTimeoutMs: 5_000,
+  });
+}
 
-    while (iterations < MAX_ITERATIONS) {
-      iterations++;
-      console.log(`[Agent] Session ${sessionId} — iteration ${iterations}`);
+// ── Sync agent progress (called by GET /messages + sweep) ────────────────────
 
-      const data = await callLLM(llmMessages);
-      const msg = data.choices?.[0]?.message;
-      if (!msg) throw new Error("No LLM response");
+interface LogEntry {
+  type: "tool_call" | "done" | "error";
+  id?: string;
+  name?: string;
+  args?: Record<string, string>;
+  result?: string;
+  timestamp?: string;
+  content?: string;
+  filesChanged?: string[];
+}
 
-      llmMessages.push(msg);
+function parseLogFile(content: string): LogEntry[] {
+  if (!content) return [];
+  return content
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => {
+      try { return JSON.parse(line); } catch { return null; }
+    })
+    .filter(Boolean) as LogEntry[];
+}
 
-      // ── Tool calls ──────────────────────────────────────────────────
-      if (msg.tool_calls && msg.tool_calls.length > 0) {
-        for (const tc of msg.tool_calls) {
-          const { name, arguments: argsStr } = tc.function;
+export async function syncAgentProgress(sessionId: string): Promise<void> {
+  const session = await prisma.session.findUnique({
+    where: { id: sessionId },
+    select: {
+      agentRunId: true,
+      agentWorkingMsgId: true,
+      agentRunStartedAt: true,
+      sandboxId: true,
+    },
+  });
 
-          // Update status text
-          const statusMap: Record<string, string> = {
-            read_file: "Reading files...",
-            write_file: "Writing files...",
-            list_files: "Browsing project...",
-            search_code: "Searching code...",
-            run_command: "Running commands...",
-          };
+  if (!session?.agentRunId || !session.sandboxId) return;
 
-          let args: Record<string, string>;
-          try { args = JSON.parse(argsStr); } catch { args = {}; }
-
-          const result = await executeTool(sandbox, name, args);
-
-          allToolCalls.push({
-            id: randomUUID(),
-            name,
-            args: sanitizeArgs(args),
-            result: result.slice(0, 2000),
-            timestamp: new Date().toISOString(),
-          });
-
-          llmMessages.push({ role: "tool", tool_call_id: tc.id, content: result });
-        }
-
-        // Update working message with live tool calls + status
-        const latestTool = msg.tool_calls[msg.tool_calls.length - 1];
-        const latestName = latestTool?.function?.name || "";
-        const statusMap: Record<string, string> = {
-          read_file: "Reading files...",
-          write_file: "Writing files...",
-          list_files: "Browsing project...",
-          search_code: "Searching code...",
-          run_command: "Running commands...",
-        };
-        await prisma.chatMessage.update({
-          where: { id: workingMsg.id },
-          data: {
-            content: statusMap[latestName] || "Working on it...",
-            metadata: JSON.parse(JSON.stringify({ toolCalls: allToolCalls })),
-          },
-        });
-
-        continue;
+  // Safety valve: if agent has been running > 1 hour, clean up
+  if (session.agentRunStartedAt) {
+    const age = Date.now() - session.agentRunStartedAt.getTime();
+    if (age > AGENT_STALE_MS) {
+      console.log(`[Agent] Stale agent run for session ${sessionId}, cleaning up`);
+      if (session.agentWorkingMsgId) {
+        await prisma.chatMessage.delete({ where: { id: session.agentWorkingMsgId } }).catch(() => {});
       }
-
-      // ── Text response — done ────────────────────────────────────────
-      finalText = msg.content || "";
-      break;
-    }
-
-    if (!finalText && iterations >= MAX_ITERATIONS) {
-      // Force a summary
-      llmMessages.push({
-        role: "user",
-        content: "You've used many tool calls. Please summarize what you've done and what the current state is.",
+      await prisma.chatMessage.create({
+        data: {
+          sessionId,
+          role: "SYSTEM",
+          content: "Agent timed out after 1 hour. You can send a new message to try again.",
+        },
       });
-      const summary = await callLLM(llmMessages);
-      const summaryMsg = summary.choices?.[0]?.message;
-      finalText = summaryMsg?.content || "Done.";
+      await prisma.session.update({
+        where: { id: sessionId },
+        data: { agentRunId: null, agentWorkingMsgId: null, agentRunStartedAt: null },
+      });
+      return;
+    }
+  }
+
+  // Read log file from sandbox
+  let logContent = "";
+  try {
+    const sandbox = await Sandbox.connect(session.sandboxId);
+    logContent = String(await sandbox.files.read(LOG_PATH));
+  } catch {
+    // Sandbox might not be reachable — skip this cycle
+    return;
+  }
+
+  const entries = parseLogFile(logContent);
+  if (entries.length === 0) return;
+
+  // Check for done/error entry
+  const doneEntry = entries.find((e) => e.type === "done");
+  const errorEntry = entries.find((e) => e.type === "error");
+
+  // Extract tool calls for display
+  const toolCalls: ToolCallEntry[] = entries
+    .filter((e) => e.type === "tool_call")
+    .map((e) => ({
+      id: e.id || "",
+      name: e.name || "",
+      args: e.args || {},
+      result: e.result || "",
+      timestamp: e.timestamp || "",
+    }));
+
+  if (doneEntry || errorEntry) {
+    // Agent finished — finalize
+    const finalContent = doneEntry?.content || errorEntry?.content || "Done.";
+    const filesChanged = doneEntry?.filesChanged || [];
+
+    // Delete working message
+    if (session.agentWorkingMsgId) {
+      await prisma.chatMessage.delete({ where: { id: session.agentWorkingMsgId } }).catch(() => {});
     }
 
-    // Remove working placeholder
-    await prisma.chatMessage.delete({ where: { id: workingMsg.id } }).catch(() => {});
-
-    // Build final assistant message
-    const changedFiles = await listChangedFiles(sandbox);
-    const hasMetadata = changedFiles.length > 0 || allToolCalls.length > 0;
+    // Create final assistant message
+    const hasMetadata = filesChanged.length > 0 || toolCalls.length > 0;
     const metadata = hasMetadata
       ? {
-          ...(changedFiles.length > 0 ? { filesChanged: changedFiles } : {}),
-          ...(allToolCalls.length > 0 ? { toolCalls: allToolCalls } : {}),
+          ...(filesChanged.length > 0 ? { filesChanged } : {}),
+          ...(toolCalls.length > 0 ? { toolCalls } : {}),
         }
       : undefined;
 
     await prisma.chatMessage.create({
       data: {
         sessionId,
-        role: "ASSISTANT",
-        content: finalText || "Done.",
+        role: errorEntry ? "SYSTEM" : "ASSISTANT",
+        content: finalContent,
         metadata: metadata ? JSON.parse(JSON.stringify(metadata)) : undefined,
       },
     });
-  } catch (error) {
-    // Clean up working message on error
-    await prisma.chatMessage.delete({ where: { id: workingMsg.id } }).catch(() => {});
-    throw error;
+
+    // Clear agent run tracking
+    await prisma.session.update({
+      where: { id: sessionId },
+      data: { agentRunId: null, agentWorkingMsgId: null, agentRunStartedAt: null },
+    });
+  } else if (session.agentWorkingMsgId && toolCalls.length > 0) {
+    // Agent still running — update working message with live tool calls
+    const latestTool = toolCalls[toolCalls.length - 1];
+    const statusMap: Record<string, string> = {
+      read_file: "Reading files...",
+      write_file: "Writing files...",
+      list_files: "Browsing project...",
+      search_code: "Searching code...",
+      run_command: "Running commands...",
+    };
+
+    await prisma.chatMessage.update({
+      where: { id: session.agentWorkingMsgId },
+      data: {
+        content: statusMap[latestTool?.name || ""] || "Working on it...",
+        metadata: JSON.parse(JSON.stringify({ toolCalls })),
+      },
+    });
   }
 }
 
-/** Strip large values (like file content) from args for display */
-function sanitizeArgs(args: Record<string, string>): Record<string, string> {
-  const sanitized: Record<string, string> = {};
-  for (const [k, v] of Object.entries(args)) {
-    if (k === "content" && v.length > 200) {
-      sanitized[k] = v.slice(0, 200) + "...";
-    } else {
-      sanitized[k] = v;
+// ── Background sweep ─────────────────────────────────────────────────────────
+
+export async function sweepActiveAgentRuns(): Promise<void> {
+  try {
+    const sessions = await prisma.session.findMany({
+      where: {
+        agentRunId: { not: null },
+        status: "RUNNING",
+      },
+      select: { id: true },
+    });
+
+    for (const session of sessions) {
+      try {
+        await syncAgentProgress(session.id);
+      } catch (err) {
+        console.error(`[Agent] Sweep error for session ${session.id}:`, err);
+      }
     }
+  } catch (err) {
+    console.error("[Agent] Sweep job error:", err);
   }
-  return sanitized;
 }

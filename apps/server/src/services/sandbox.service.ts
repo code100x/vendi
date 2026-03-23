@@ -40,6 +40,7 @@ export async function startSessionSandbox(
     envs: {
       GITHUB_TOKEN: githubToken,
       ...(env.OPENAI_API_KEY ? { OPENAI_API_KEY: env.OPENAI_API_KEY } : {}),
+      ...(env.OPENROUTER_API_KEY ? { OPENROUTER_API_KEY: env.OPENROUTER_API_KEY } : {}),
     },
   });
 

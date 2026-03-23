@@ -4,6 +4,7 @@ import { env } from "./config/env";
 import { setupWebSocket } from "./lib/ws";
 import { prisma } from "./lib/prisma";
 import { Sandbox } from "e2b";
+import { sweepActiveAgentRuns } from "./services/agent.service";
 
 const server = createServer(app);
 
@@ -54,3 +55,7 @@ async function cleanupOrphanedSandboxes() {
 }
 
 setInterval(cleanupOrphanedSandboxes, CLEANUP_INTERVAL_MS);
+
+// Sync agent progress every 30s (safety net for when user leaves the page)
+const AGENT_SWEEP_INTERVAL_MS = 30 * 1000;
+setInterval(sweepActiveAgentRuns, AGENT_SWEEP_INTERVAL_MS);

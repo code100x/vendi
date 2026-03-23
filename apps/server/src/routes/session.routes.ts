@@ -8,6 +8,7 @@ import {
   commitToMain,
   discardSession,
 } from "../services/session.service";
+import { syncAgentProgress } from "../services/agent.service";
 
 const router = Router();
 
@@ -295,6 +296,11 @@ router.get("/:sessionId/messages", async (req: Request, res: Response) => {
 
     const result = await getSessionWithAccess(sessionId, userId, res);
     if (!result) return;
+
+    // Lazy sync: if agent is running, read log from sandbox and update DB
+    await syncAgentProgress(sessionId).catch((err) => {
+      console.error(`[Messages] Sync error for ${sessionId}:`, err);
+    });
 
     const messages = await prisma.chatMessage.findMany({
       where: { sessionId },

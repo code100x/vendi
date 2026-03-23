@@ -1,7 +1,7 @@
 import { prisma } from "../lib/prisma";
 import { startSessionSandbox, stopSandbox, pushChangesFromSandbox } from "./sandbox.service";
 import { createPullRequest, mergePullRequest, deleteBranch } from "./github.service";
-import { runAgentTurn } from "./agent.service";
+import { startAgentTurn } from "./agent.service";
 
 export async function startSession(projectId: string, userId: string) {
   // Check project is ready
@@ -94,9 +94,6 @@ If anything fails, fix it yourself. Keep messages short and non-technical.`;
   }
 }
 
-// In-memory lock per session on this pod
-const sessionLocks = new Set<string>();
-
 export async function sendMessage(sessionId: string, content: string, options?: { hidden?: boolean }) {
   // Save user message to DB IMMEDIATELY so it appears in the UI right away
   if (!options?.hidden) {
@@ -105,35 +102,29 @@ export async function sendMessage(sessionId: string, content: string, options?: 
     });
   }
 
-  // Wait for any in-memory lock on this pod
-  while (sessionLocks.has(sessionId)) {
-    await new Promise((r) => setTimeout(r, 1000));
+  const session = await prisma.session.findUniqueOrThrow({
+    where: { id: sessionId },
+    include: { project: true },
+  });
+
+  if (session.status !== "RUNNING" || !session.sandboxId) {
+    throw new Error("Session is not active");
   }
 
-  sessionLocks.add(sessionId);
-
-  try {
-    const session = await prisma.session.findUniqueOrThrow({
-      where: { id: sessionId },
-      include: { project: true },
-    });
-
-    if (session.status !== "RUNNING" || !session.sandboxId) {
-      throw new Error("Session is not active");
-    }
-
-    const systemPrompt = buildSystemPrompt(session.project);
-
-    await runAgentTurn({
-      sessionId,
-      sandboxId: session.sandboxId,
-      userMessage: content,
-      systemPrompt,
-      maxBudgetUsd: session.project.maxBudgetUsd,
-    });
-  } finally {
-    sessionLocks.delete(sessionId);
+  // Don't start a new turn if one is already running
+  if (session.agentRunId) {
+    throw new Error("Agent is still processing");
   }
+
+  const systemPrompt = buildSystemPrompt(session.project);
+
+  // Non-blocking: starts agent in sandbox and returns immediately
+  await startAgentTurn({
+    sessionId,
+    sandboxId: session.sandboxId,
+    userMessage: content,
+    systemPrompt,
+  });
 }
 
 function buildSystemPrompt(project: {
