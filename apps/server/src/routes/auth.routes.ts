@@ -138,7 +138,10 @@ router.get("/github/callback", async (req, res) => {
   const { code, state } = req.query;
   const storedState = req.cookies?.github_oauth_state;
 
+  console.log("GitHub callback - state match:", state === storedState, "hasCode:", !!code, "redirectURI:", env.GITHUB_REDIRECT_URI);
+
   if (!code || !state || !storedState || state !== storedState) {
+    console.log("GitHub callback - state check failed. storedState:", !!storedState, "state:", !!state);
     return res.redirect(env.FRONTEND_URL + "/signin?error=auth_failed");
   }
 
