@@ -124,6 +124,7 @@ model Project {
   setupLlmHistory       Json?
   setupStatus           String         @default("")
   setupIsProcessing     Boolean        @default(false)
+  setupSandboxId        String?
   createdAt             DateTime       @default(now())
   updatedAt             DateTime       @updatedAt
 

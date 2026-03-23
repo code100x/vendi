@@ -4,7 +4,7 @@ import { encrypt } from "../lib/crypto";
 import { requireOrg } from "../middleware/requireOrg";
 import { createProjectSchema, updateProjectConfigSchema } from "@vendi/shared";
 import { buildProjectTemplate } from "../services/template.service";
-import { startSetupSession, sendSetupMessage, isSetupActive, getSetupState } from "../services/setup.service";
+import { startSetupSession, sendSetupMessage, isSetupActive, getSetupState, resetSetup } from "../services/setup.service";
 
 const router = Router({ mergeParams: true });
 
@@ -343,6 +343,22 @@ router.get(
       return res.json({ active: false, messages: [], status: "", isProcessing: false });
     }
     return res.json({ active: true, ...state });
+  }
+);
+
+// POST /orgs/:orgId/projects/:projectId/setup/reset — restart setup from scratch
+router.post(
+  "/:projectId/setup/reset",
+  requireOrg("ADMIN"),
+  async (req: Request, res: Response) => {
+    try {
+      const projectId = getProjectId(req);
+      await resetSetup(projectId);
+      return res.json({ ok: true });
+    } catch (e) {
+      console.error("Reset setup error:", e);
+      return res.status(500).json({ error: "Failed to reset setup" });
+    }
   }
 );
 

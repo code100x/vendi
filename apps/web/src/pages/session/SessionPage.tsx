@@ -5,7 +5,7 @@ import { api } from "../../lib/api";
 import { cn } from "../../lib/utils";
 import { useSessionStore } from "../../stores/sessionStore";
 import { VncPreview } from "../../components/preview/VncPreview";
-import type { Session, ChatMessage, Project } from "@vendi/shared";
+import type { Session, ChatMessage, Project, ToolCallEntry } from "@vendi/shared";
 import { toast } from "sonner";
 import {
   ArrowLeft,
@@ -19,7 +19,29 @@ import {
   FileCode2,
   CheckCircle2,
   ArrowLeftCircle,
+  ChevronDown,
+  Terminal,
+  FileText,
+  FolderOpen,
+  Search,
+  Wrench,
 } from "lucide-react";
+
+// ── Tool call metadata ────────────────────────────────────────────────────────
+
+const TOOL_META: Record<string, { icon: typeof Terminal; label: string; argKey: string }> = {
+  shell:        { icon: Terminal, label: "Run",    argKey: "command" },
+  bash:         { icon: Terminal, label: "Run",    argKey: "command" },
+  run_command:  { icon: Terminal, label: "Run",    argKey: "command" },
+  read_file:    { icon: FileText, label: "Read",   argKey: "path" },
+  file_read:    { icon: FileText, label: "Read",   argKey: "path" },
+  write_file:   { icon: FileText, label: "Write",  argKey: "path" },
+  file_write:   { icon: FileText, label: "Write",  argKey: "path" },
+  list_files:   { icon: FolderOpen, label: "List", argKey: "path" },
+  list_dir:     { icon: FolderOpen, label: "List", argKey: "path" },
+  search_code:  { icon: Search, label: "Search",   argKey: "pattern" },
+  search:       { icon: Search, label: "Search",   argKey: "query" },
+};
 
 // ── Status badge ────────────────────────────────────────────────────────────
 
@@ -48,14 +70,59 @@ function StatusBadge({ status }: { status: string }) {
   );
 }
 
+// ── Tool call detail row ──────────────────────────────────────────────────────
+
+function ToolCallRow({ tc, isExpanded, onToggle }: {
+  tc: ToolCallEntry;
+  isExpanded: boolean;
+  onToggle: () => void;
+}) {
+  const meta = TOOL_META[tc.name] || { icon: Wrench, label: tc.name, argKey: "" };
+  const Icon = meta.icon;
+  const argValue = meta.argKey && tc.args[meta.argKey]
+    ? tc.args[meta.argKey]
+    : Object.values(tc.args).join(" ") || tc.name;
+
+  return (
+    <div className="border-b border-gray-50 last:border-0">
+      <button
+        onClick={onToggle}
+        className="flex items-center gap-2 px-3 py-1.5 w-full text-left hover:bg-gray-50 transition-colors"
+      >
+        <Icon className="h-3.5 w-3.5 text-gray-400 shrink-0" />
+        <span className="text-xs text-gray-600 truncate flex-1 font-mono">
+          {argValue}
+        </span>
+        {tc.result && (
+          <ChevronDown
+            className={cn(
+              "h-3 w-3 text-gray-300 shrink-0 transition-transform",
+              isExpanded && "rotate-180"
+            )}
+          />
+        )}
+      </button>
+      {isExpanded && tc.result && (
+        <pre className="px-3 py-2 bg-gray-50 text-[11px] text-gray-500 overflow-x-auto max-h-40 font-mono whitespace-pre-wrap break-all">
+          {tc.result}
+        </pre>
+      )}
+    </div>
+  );
+}
+
 // ── Chat message ────────────────────────────────────────────────────────────
 
 function ChatBubble({ message }: { message: ChatMessage }) {
+  const [toolsExpanded, setToolsExpanded] = useState(false);
+  const [expandedToolId, setExpandedToolId] = useState<string | null>(null);
+
   const time = new Date(message.createdAt).toLocaleTimeString([], {
     hour: "2-digit",
     minute: "2-digit",
   });
   const filesChanged = message.metadata?.filesChanged;
+  const toolCalls = message.metadata?.toolCalls;
 
   if (message.role === "SYSTEM") {
     return (
@@ -74,30 +141,68 @@ function ChatBubble({ message }: { message: ChatMessage }) {
     <div className={cn("flex mb-3", isUser ? "justify-end" : "justify-start")}>
       <div
         className={cn(
-          "max-w-[80%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed",
+          "max-w-[80%] rounded-2xl text-sm leading-relaxed overflow-hidden",
           isUser
             ? "bg-gray-900 text-white rounded-br-md"
             : "bg-white border border-gray-200 text-gray-800 rounded-bl-md shadow-sm"
         )}
       >
-        <div className="whitespace-pre-wrap break-words">{message.content}</div>
-        {filesChanged && filesChanged.length > 0 && (
-          <div
-            className={cn(
-              "mt-2 flex items-center gap-1 text-xs",
-              isUser ? "text-gray-300" : "text-gray-400"
+        <div className="px-4 py-2.5">
+          <div className="whitespace-pre-wrap break-words">{message.content}</div>
+          {filesChanged && filesChanged.length > 0 && (
+            <div
+              className={cn(
+                "mt-2 flex items-center gap-1 text-xs",
+                isUser ? "text-gray-300" : "text-gray-400"
+              )}
+            >
+              <FileCode2 className="h-3 w-3" />
+              <span>
+                {filesChanged.length} file{filesChanged.length !== 1 ? "s" : ""}{" "}
+                changed
+              </span>
+            </div>
+          )}
+          <div className={cn("mt-1 text-[10px]", isUser ? "text-gray-400" : "text-gray-300")}>
+            {time}
+          </div>
+        </div>
+
+        {/* Expandable tool calls for assistant messages */}
+        {!isUser && toolCalls && toolCalls.length > 0 && (
+          <div className="border-t border-gray-100">
+            <button
+              onClick={() => setToolsExpanded((v) => !v)}
+              className="flex items-center gap-2 px-4 py-2 w-full hover:bg-gray-50 transition-colors"
+            >
+              <Wrench className="h-3 w-3 text-gray-400" />
+              <span className="text-xs text-gray-400">
+                {toolCalls.length} tool {toolCalls.length === 1 ? "call" : "calls"}
+              </span>
+              <ChevronDown
+                className={cn(
+                  "h-3 w-3 text-gray-300 ml-auto transition-transform",
+                  toolsExpanded && "rotate-180"
+                )}
+              />
+            </button>
+
+            {toolsExpanded && (
+              <div className="border-t border-gray-100 max-h-64 overflow-y-auto">
+                {toolCalls.map((tc) => (
+                  <ToolCallRow
+                    key={tc.id}
+                    tc={tc}
+                    isExpanded={expandedToolId === tc.id}
+                    onToggle={() =>
+                      setExpandedToolId(expandedToolId === tc.id ? null : tc.id)
+                    }
+                  />
+                ))}
+              </div>
             )}
-          >
-            <FileCode2 className="h-3 w-3" />
-            <span>
-              {filesChanged.length} file{filesChanged.length !== 1 ? "s" : ""}{" "}
-              changed
-            </span>
           </div>
         )}
-        <div className={cn("mt-1 text-[10px]", isUser ? "text-gray-400" : "text-gray-300")}>
-          {time}
-        </div>
       </div>
     </div>
   );

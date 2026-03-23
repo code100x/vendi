@@ -22,8 +22,8 @@ interface ToolCallEntry {
   timestamp: string;
 }
 
-// In-memory: only sandbox references (can't be serialized)
-const activeSandboxes = new Map<string, Sandbox>();
+// In-memory cache: avoids reconnecting on every request within the same pod
+const sandboxCache = new Map<string, Sandbox>();
 const sandboxTimeouts = new Map<string, NodeJS.Timeout>();
 
 const SANDBOX_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes
@@ -36,6 +36,27 @@ function scheduleSandboxCleanup(projectId: string) {
     cleanupSandbox(projectId);
   }, SANDBOX_TIMEOUT_MS);
   sandboxTimeouts.set(projectId, timeout);
+}
+
+/** Get sandbox — from local cache or reconnect via DB-persisted sandboxId */
+async function getSandbox(projectId: string): Promise<Sandbox> {
+  const cached = sandboxCache.get(projectId);
+  if (cached) return cached;
+
+  // Try to reconnect using the sandbox ID stored in DB
+  const project = await prisma.project.findUnique({
+    where: { id: projectId },
+    select: { setupSandboxId: true },
+  });
+  if (!project?.setupSandboxId) {
+    throw new Error("No active sandbox. Please refresh to restart setup.");
+  }
+
+  console.log(`[Setup] Reconnecting to sandbox ${project.setupSandboxId} for project ${projectId}`);
+  const sandbox = await Sandbox.connect(project.setupSandboxId);
+  sandboxCache.set(projectId, sandbox);
+  scheduleSandboxCleanup(projectId);
+  return sandbox;
 }
 
 const SETUP_SYSTEM_PROMPT = `You are a project setup assistant for Vendi. Your job is to analyze a project's codebase and automatically configure it for running in a sandbox environment.
@@ -144,6 +165,7 @@ async function persistState(
     llmHistory?: any[];
     status?: string;
     isProcessing?: boolean;
+    sandboxId?: string | null;
   }
 ) {
   const data: any = {};
@@ -152,6 +174,7 @@ async function persistState(
   if (updates.llmHistory !== undefined) data.setupLlmHistory = updates.llmHistory;
   if (updates.status !== undefined) data.setupStatus = updates.status;
   if (updates.isProcessing !== undefined) data.setupIsProcessing = updates.isProcessing;
+  if (updates.sandboxId !== undefined) data.setupSandboxId = updates.sandboxId;
   await prisma.project.update({ where: { id: projectId }, data });
 }
 
@@ -257,7 +280,7 @@ export async function startSetupSession(projectId: string, userId: string): Prom
   const project = await prisma.project.findUniqueOrThrow({ where: { id: projectId } });
 
   // If sandbox already active on this pod, skip
-  if (activeSandboxes.has(projectId)) return projectId;
+  if (sandboxCache.has(projectId)) return projectId;
 
   // If another pod is processing, skip
   const existing = await loadState(projectId);
@@ -288,8 +311,9 @@ export async function startSetupSession(projectId: string, userId: string): Prom
     try {
       await persistState(projectId, { status: "Creating sandbox..." });
       const sandbox = await Sandbox.create({ timeoutMs: 30 * 60_000 });
-      activeSandboxes.set(projectId, sandbox);
+      sandboxCache.set(projectId, sandbox);
       scheduleSandboxCleanup(projectId);
+      await persistState(projectId, { sandboxId: sandbox.sandboxId });
 
       await persistState(projectId, { status: "Cloning repository..." });
       await sandbox.commands.run(
@@ -366,8 +390,7 @@ export async function sendSetupMessage(projectId: string, content: string): Prom
   if (!state) throw new Error("No setup session found");
   if (state.isProcessing) throw new Error("Agent is still processing");
 
-  const sandbox = activeSandboxes.get(projectId);
-  if (!sandbox) throw new Error("No active sandbox. Please refresh to restart setup.");
+  const sandbox = await getSandbox(projectId);
   scheduleSandboxCleanup(projectId);
 
   const chatMessages = state.messages;
@@ -474,6 +497,21 @@ export async function isSetupActive(projectId: string): Promise<boolean> {
   return !!state?.isProcessing;
 }
 
+export async function resetSetup(projectId: string): Promise<void> {
+  await cleanupSandbox(projectId);
+  await prisma.project.update({
+    where: { id: projectId },
+    data: {
+      setupMessages: null,
+      setupToolCalls: null,
+      setupLlmHistory: null,
+      setupStatus: "",
+      setupIsProcessing: false,
+      setupSandboxId: null,
+    },
+  });
+}
+
 async function applySetupConfig(projectId: string, config: any) {
   const data: any = {};
   if (config.requiredServices) data.requiredServices = config.requiredServices;
@@ -498,9 +536,25 @@ async function cleanupSandbox(projectId: string) {
     clearTimeout(timeout);
     sandboxTimeouts.delete(projectId);
   }
-  const sandbox = activeSandboxes.get(projectId);
+
+  // Try local cache first, then reconnect from DB to kill
+  let sandbox = sandboxCache.get(projectId);
+  if (!sandbox) {
+    const project = await prisma.project.findUnique({
+      where: { id: projectId },
+      select: { setupSandboxId: true },
+    });
+    if (project?.setupSandboxId) {
+      sandbox = await Sandbox.connect(project.setupSandboxId).catch(() => null as any);
+    }
+  }
   if (sandbox) {
     await sandbox.kill().catch(() => {});
-    activeSandboxes.delete(projectId);
   }
+
+  sandboxCache.delete(projectId);
+  await prisma.project.update({
+    where: { id: projectId },
+    data: { setupSandboxId: null },
+  });
 }

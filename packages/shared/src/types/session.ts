@@ -31,14 +31,24 @@ export interface Session {
   endedAt: string | null;
 }
 
+export interface ToolCallEntry {
+  id: string;
+  name: string;
+  args: Record<string, string>;
+  result: string;
+  timestamp: string;
+}
+
 export interface ChatMessage {
   id: string;
   sessionId: string;
   role: MessageRole;
   content: string;
+  rawContent: string | null;
   metadata: {
     filesChanged?: string[];
     toolsUsed?: string[];
+    toolCalls?: ToolCallEntry[];
     hasErrors?: boolean;
   } | null;
   createdAt: string;

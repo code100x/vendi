@@ -16,6 +16,7 @@ import {
   FolderOpen,
   Search,
   Terminal,
+  RotateCcw,
 } from "lucide-react";
 
 interface SetupMsg {
@@ -173,6 +174,32 @@ export function ProjectSetup() {
     }
   }, [handleSend]);
 
+  const [isResetting, setIsResetting] = useState(false);
+
+  const handleReset = useCallback(async () => {
+    if (!window.confirm("This will restart setup from scratch. Continue?")) return;
+    setIsResetting(true);
+    try {
+      await api.post(`/orgs/${orgId}/projects/${projectId}/setup/reset`);
+      // Clear local state
+      setMessages([]);
+      setToolCalls([]);
+      setAgentStatus("");
+      setIsProcessing(false);
+      setSetupComplete(false);
+      setToolsExpanded(false);
+      setExpandedToolId(null);
+      setInput("");
+      setupTriggeredRef.current = false;
+      // Re-trigger setup start
+      await api.post(`/orgs/${orgId}/projects/${projectId}/setup/start`);
+    } catch (err: any) {
+      toast.error("Failed to reset: " + (err.response?.data?.error || err.message));
+    } finally {
+      setIsResetting(false);
+    }
+  }, [orgId, projectId]);
+
   const templateStatus = project?.templateStatus;
 
   return (
@@ -191,6 +218,17 @@ export function ProjectSetup() {
           </h1>
           <p className="text-xs text-gray-400">{project?.githubRepoFullName}</p>
         </div>
+        {!setupComplete && (
+          <button
+            onClick={handleReset}
+            disabled={isResetting}
+            className="flex items-center gap-1.5 rounded-lg border border-gray-200 px-2.5 py-1.5 text-xs text-gray-500 hover:bg-gray-50 hover:text-gray-700 transition-colors disabled:opacity-50"
+            title="Restart setup from scratch"
+          >
+            <RotateCcw className={cn("h-3.5 w-3.5", isResetting && "animate-spin")} />
+            Restart
+          </button>
+        )}
         <Bot className="h-5 w-5 text-gray-400" />
       </div>
 

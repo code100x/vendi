@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { Sandbox } from "e2b";
 import { prisma } from "../lib/prisma";
 import { env } from "../config/env";
+import type { ToolCallEntry } from "@vendi/shared";
 
 interface AgentRunConfig {
   sessionId: string;
@@ -117,6 +118,68 @@ async function listChangedFiles(sandbox: Sandbox): Promise<string[]> {
     .map((line: string) => line.slice(3).trim())
     .filter(Boolean)
     .slice(0, 50);
+}
+
+/**
+ * Parse Codex --json stdout to extract structured tool call events.
+ * Codex outputs newline-delimited JSON; we look for function_call / function_call_output pairs.
+ */
+function parseCodexToolCalls(stdout: string): ToolCallEntry[] {
+  if (!stdout) return [];
+
+  const toolCalls: ToolCallEntry[] = [];
+  const pending = new Map<string, { name: string; args: Record<string, string> }>();
+
+  for (const line of stdout.split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      const raw = JSON.parse(line);
+      // Handle both direct events and events wrapped in an "item" envelope
+      const event = raw.item || raw;
+
+      if (event.type === "function_call") {
+        const callId = event.call_id || event.id || randomUUID();
+        let args: Record<string, string> = {};
+        try {
+          const parsed = JSON.parse(event.arguments || "{}");
+          for (const [k, v] of Object.entries(parsed)) {
+            args[k] = Array.isArray(v) ? v.join(" ") : String(v);
+          }
+        } catch {
+          args = { raw: event.arguments || "" };
+        }
+        pending.set(callId, { name: event.name || "unknown", args });
+      } else if (event.type === "function_call_output") {
+        const callId = event.call_id || event.id;
+        const entry = pending.get(callId);
+        if (entry) {
+          toolCalls.push({
+            id: callId,
+            name: entry.name,
+            args: entry.args,
+            result: String(event.output || "").slice(0, 3000),
+            timestamp: new Date().toISOString(),
+          });
+          pending.delete(callId);
+        }
+      }
+    } catch {
+      // Skip non-JSON lines
+    }
+  }
+
+  // Flush remaining calls that had no output
+  for (const [callId, entry] of pending) {
+    toolCalls.push({
+      id: callId,
+      name: entry.name,
+      args: entry.args,
+      result: "",
+      timestamp: new Date().toISOString(),
+    });
+  }
+
+  return toolCalls;
 }
 
 function buildPrompt(systemPrompt: string, userMessage: string, maxBudgetUsd: number): string {
@@ -289,17 +352,27 @@ export async function runAgentTurn(config: AgentRunConfig): Promise<void> {
 
   const finalMessage = (await readIfExists(sandbox, outputPath)).trim();
   const changedFiles = await listChangedFiles(sandbox);
+  const toolCalls = parseCodexToolCalls(result?.stdout || "");
 
   if (result.exitCode === 0) {
     await sandbox.files.write(MODEL_FILE, chosenModel);
     await sandbox.commands.run(`touch ${READY_MARKER}`, { requestTimeoutMs: 5_000 });
+
+    const hasMetadata = changedFiles.length > 0 || toolCalls.length > 0;
+    const metadata = hasMetadata
+      ? JSON.parse(JSON.stringify({
+          ...(changedFiles.length > 0 ? { filesChanged: changedFiles } : {}),
+          ...(toolCalls.length > 0 ? { toolCalls } : {}),
+        }))
+      : undefined;
 
     await prisma.chatMessage.create({
       data: {
         sessionId,
         role: "ASSISTANT",
         content: finalMessage || "Done.",
-        metadata: changedFiles.length > 0 ? { filesChanged: changedFiles } : undefined,
+        rawContent: result.stdout || null,
+        metadata,
       },
     });
     return;
