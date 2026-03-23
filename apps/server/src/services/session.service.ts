@@ -1,8 +1,10 @@
+import { Sandbox } from "e2b";
 import { prisma } from "../lib/prisma";
 import { startSessionSandbox, stopSandbox, pushChangesFromSandbox } from "./sandbox.service";
 import { createPullRequest, mergePullRequest, deleteBranch } from "./github.service";
-import { runAgentTurn } from "./agent.service";
+import { runAgentTurn, recoverAgentRun } from "./agent.service";
 import type { WsServerMessage } from "@vendi/shared";
+import type { Session } from "@prisma/client";
 
 export async function startSession(projectId: string, userId: string) {
   // Check project is ready
@@ -95,13 +97,44 @@ If anything fails, fix it yourself. Keep messages short and non-technical.`;
   }
 }
 
-// Simple lock per session to prevent concurrent agent turns
+// In-memory lock per session on this pod (fast path to avoid DB contention)
 const sessionLocks = new Set<string>();
 
+// Max time we'll wait for a stale agent run before assuming the pod crashed
+const AGENT_RUN_STALE_MS = 10 * 60 * 1000; // 10 minutes
+
 export async function sendMessage(sessionId: string, content: string, options?: { hidden?: boolean }) {
-  // Wait for any existing agent turn to finish
+  // Wait for any in-memory lock on this pod
   while (sessionLocks.has(sessionId)) {
     await new Promise((r) => setTimeout(r, 1000));
+  }
+
+  // Check DB for an in-flight agent run (may be on another pod)
+  const session = await prisma.session.findUniqueOrThrow({ where: { id: sessionId } });
+  if (session.agentRunId) {
+    const runAge = Date.now() - (session.agentRunStartedAt?.getTime() || 0);
+    if (runAge < AGENT_RUN_STALE_MS) {
+      // Another pod is still processing — try to recover its result
+      if (session.sandboxId) {
+        const recovered = await tryRecoverAgentRun(session);
+        if (!recovered) {
+          // Still running — wait a bit and retry
+          await new Promise((r) => setTimeout(r, 3000));
+          return sendMessage(sessionId, content, options);
+        }
+      }
+    } else {
+      // Stale run — the pod likely crashed. Clean up.
+      console.log(`[Session] Clearing stale agent run ${session.agentRunId} for session ${sessionId}`);
+      await prisma.session.update({
+        where: { id: sessionId },
+        data: { agentRunId: null, agentWorkingMsgId: null, agentRunStartedAt: null },
+      });
+      // Delete the stale "working" message
+      if (session.agentWorkingMsgId) {
+        await prisma.chatMessage.delete({ where: { id: session.agentWorkingMsgId } }).catch(() => {});
+      }
+    }
   }
 
   sessionLocks.add(sessionId);
@@ -110,6 +143,24 @@ export async function sendMessage(sessionId: string, content: string, options?: 
     return await _sendMessage(sessionId, content, options);
   } finally {
     sessionLocks.delete(sessionId);
+  }
+}
+
+/** Try to recover a Codex run from a crashed pod by checking if it finished */
+async function tryRecoverAgentRun(session: Session): Promise<boolean> {
+  if (!session.sandboxId || !session.agentRunId) return false;
+  try {
+    const recovered = await recoverAgentRun(session.id, session.sandboxId, session.agentRunId, session.agentWorkingMsgId);
+    if (recovered) {
+      await prisma.session.update({
+        where: { id: session.id },
+        data: { agentRunId: null, agentWorkingMsgId: null, agentRunStartedAt: null },
+      });
+    }
+    return recovered;
+  } catch (e) {
+    console.error("[Session] Recovery failed:", e);
+    return false;
   }
 }
 

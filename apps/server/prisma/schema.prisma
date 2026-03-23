@@ -156,6 +156,9 @@ model Session {
   outcome        SessionOutcome?
   prUrl          String?
   commitSha      String?
+  agentRunId     String?
+  agentWorkingMsgId String?
+  agentRunStartedAt DateTime?
   startedAt      DateTime        @default(now())
   endedAt        DateTime?
 

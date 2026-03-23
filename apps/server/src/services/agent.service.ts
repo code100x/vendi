@@ -315,6 +315,12 @@ export async function runAgentTurn(config: AgentRunConfig): Promise<void> {
     },
   });
 
+  // Track run in DB so other pods can detect/recover it
+  await prisma.session.update({
+    where: { id: sessionId },
+    data: { agentRunId: runId, agentWorkingMsgId: workingMsg.id, agentRunStartedAt: new Date() },
+  });
+
   let result: (CommandResult & { logPath: string }) | null = null;
   const resume = await hasExistingSession(sandbox);
   const models = await getSessionModels(sandbox);
@@ -378,8 +384,12 @@ export async function runAgentTurn(config: AgentRunConfig): Promise<void> {
 
   if (!result) throw new Error("Codex did not return a result.");
 
-  // Remove the "working" placeholder — final message replaces it
+  // Remove the "working" placeholder and clear run tracking
   await prisma.chatMessage.delete({ where: { id: workingMsg.id } }).catch(() => {});
+  await prisma.session.update({
+    where: { id: sessionId },
+    data: { agentRunId: null, agentWorkingMsgId: null, agentRunStartedAt: null },
+  });
 
   const finalMessage = (await readIfExists(sandbox, outputPath)).trim();
   const changedFiles = await listChangedFiles(sandbox);
@@ -421,4 +431,60 @@ export async function runAgentTurn(config: AgentRunConfig): Promise<void> {
   }
 
   throw new Error(failureDetails.slice(0, 1000));
+}
+
+/**
+ * Try to recover a Codex run started by a crashed pod.
+ * Checks if the output file exists (meaning Codex finished).
+ * Returns true if recovered, false if still running.
+ */
+export async function recoverAgentRun(
+  sessionId: string,
+  sandboxId: string,
+  runId: string,
+  workingMsgId: string | null
+): Promise<boolean> {
+  const sandbox = await Sandbox.connect(sandboxId);
+  const outputPath = `${CODEX_STATE_DIR}/last-message-${runId}.txt`;
+  const logPath = `${CODEX_STATE_DIR}/codex-log-${runId}.jsonl`;
+
+  // Check if Codex finished by looking for the output file
+  const finalMessage = (await readIfExists(sandbox, outputPath)).trim();
+  if (!finalMessage) return false; // Still running
+
+  console.log(`[Agent] Recovering finished run ${runId} for session ${sessionId}`);
+
+  // Codex finished — save the result
+  const changedFiles = await listChangedFiles(sandbox);
+  const logContent = await readIfExists(sandbox, logPath);
+  const toolCalls = parseCodexToolCalls(logContent);
+
+  const hasMetadata = changedFiles.length > 0 || toolCalls.length > 0;
+  const metadata = hasMetadata
+    ? JSON.parse(JSON.stringify({
+        ...(changedFiles.length > 0 ? { filesChanged: changedFiles } : {}),
+        ...(toolCalls.length > 0 ? { toolCalls } : {}),
+      }))
+    : undefined;
+
+  // Delete the stale "working" message
+  if (workingMsgId) {
+    await prisma.chatMessage.delete({ where: { id: workingMsgId } }).catch(() => {});
+  }
+
+  await prisma.chatMessage.create({
+    data: {
+      sessionId,
+      role: "ASSISTANT",
+      content: finalMessage,
+      rawContent: logContent || null,
+      metadata,
+    },
+  });
+
+  // Mark ready for next turn
+  await sandbox.files.write(MODEL_FILE, PREFERRED_MODEL);
+  await sandbox.commands.run(`touch ${READY_MARKER}`, { requestTimeoutMs: 5_000 });
+
+  return true;
 }
