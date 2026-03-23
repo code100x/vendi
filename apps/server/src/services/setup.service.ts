@@ -22,17 +22,8 @@ interface ToolCallEntry {
   timestamp: string;
 }
 
-interface SetupState {
-  sandbox: Sandbox;
-  llmMessages: any[];
-  chatMessages: ChatMsg[];
-  toolCalls: ToolCallEntry[];
-  status: string;
-  isProcessing: boolean;
-}
-
-// In-memory store — keyed by projectId
-const activeSetups = new Map<string, SetupState>();
+// In-memory: only sandbox references (can't be serialized)
+const activeSandboxes = new Map<string, Sandbox>();
 
 const SETUP_SYSTEM_PROMPT = `You are a project setup assistant for Vendi. Your job is to analyze a project's codebase and automatically configure it for running in a sandbox environment.
 
@@ -128,47 +119,95 @@ async function callLLM(messages: any[]): Promise<any> {
   return res.json();
 }
 
-function addChatMsg(state: SetupState, role: ChatMsg["role"], content: string) {
-  state.chatMessages.push({
-    id: crypto.randomUUID(),
-    role,
-    content,
-    createdAt: new Date().toISOString(),
+// ── DB persistence helpers ──────────────────────────────────────────────────
+
+async function persistState(
+  projectId: string,
+  updates: {
+    messages?: ChatMsg[];
+    toolCalls?: ToolCallEntry[];
+    llmHistory?: any[];
+    status?: string;
+    isProcessing?: boolean;
+  }
+) {
+  const data: any = {};
+  if (updates.messages !== undefined) data.setupMessages = updates.messages;
+  if (updates.toolCalls !== undefined) data.setupToolCalls = updates.toolCalls;
+  if (updates.llmHistory !== undefined) data.setupLlmHistory = updates.llmHistory;
+  if (updates.status !== undefined) data.setupStatus = updates.status;
+  if (updates.isProcessing !== undefined) data.setupIsProcessing = updates.isProcessing;
+  await prisma.project.update({ where: { id: projectId }, data });
+}
+
+async function loadState(projectId: string) {
+  const p = await prisma.project.findUnique({
+    where: { id: projectId },
+    select: {
+      setupMessages: true,
+      setupToolCalls: true,
+      setupLlmHistory: true,
+      setupStatus: true,
+      setupIsProcessing: true,
+    },
   });
+  if (!p) return null;
+  return {
+    messages: (p.setupMessages ?? []) as unknown as ChatMsg[],
+    toolCalls: (p.setupToolCalls ?? []) as unknown as ToolCallEntry[],
+    llmHistory: (p.setupLlmHistory ?? []) as unknown as any[],
+    status: p.setupStatus ?? "",
+    isProcessing: p.setupIsProcessing,
+  };
 }
 
 // ── Run LLM with tool loop ──────────────────────────────────────────────────
 
-async function runAgentLoop(state: SetupState): Promise<string> {
+interface LoopContext {
+  projectId: string;
+  sandbox: Sandbox;
+  llmMessages: any[];
+  chatMessages: ChatMsg[];
+  toolCalls: ToolCallEntry[];
+}
+
+async function runAgentLoop(ctx: LoopContext): Promise<string> {
   let iterations = 0;
   while (iterations < 30) {
     iterations++;
     console.log(`[Setup] LLM iteration ${iterations}`);
 
-    const data = await callLLM(state.llmMessages);
+    const data = await callLLM(ctx.llmMessages);
     const msg = data.choices?.[0]?.message;
     if (!msg) throw new Error("No LLM response");
 
-    state.llmMessages.push(msg);
+    ctx.llmMessages.push(msg);
 
     if (msg.tool_calls && msg.tool_calls.length > 0) {
       for (const tc of msg.tool_calls) {
         const { name, arguments: argsStr } = tc.function;
         const statusMap: Record<string, string> = { read_file: "Reading files...", list_files: "Browsing project...", search_code: "Searching code...", run_command: "Running commands..." };
-        state.status = statusMap[name] || "Working...";
+
+        await persistState(ctx.projectId, { status: statusMap[name] || "Working..." });
 
         let args: Record<string, string>;
         try { args = JSON.parse(argsStr); } catch { args = {}; }
-        const result = await executeTool(state.sandbox, name, args);
-        state.toolCalls.push({
+        const result = await executeTool(ctx.sandbox, name, args);
+        ctx.toolCalls.push({
           id: crypto.randomUUID(),
           name,
           args,
           result: result.slice(0, 2000),
           timestamp: new Date().toISOString(),
         });
-        state.llmMessages.push({ role: "tool", tool_call_id: tc.id, content: result });
+        ctx.llmMessages.push({ role: "tool", tool_call_id: tc.id, content: result });
       }
+
+      // Persist after each LLM iteration (batch tool calls)
+      await persistState(ctx.projectId, {
+        toolCalls: ctx.toolCalls,
+        llmHistory: ctx.llmMessages,
+      });
       continue;
     }
 
@@ -178,11 +217,11 @@ async function runAgentLoop(state: SetupState): Promise<string> {
 
   // Exhausted iterations — force a summary
   console.log("[Setup] Exhausted iterations, forcing summary");
-  state.llmMessages.push({ role: "user", content: "Stop reading files. Summarize what you found and ask your first question." });
-  const summary = await callLLM(state.llmMessages);
+  ctx.llmMessages.push({ role: "user", content: "Stop reading files. Summarize what you found and ask your first question." });
+  const summary = await callLLM(ctx.llmMessages);
   const summaryMsg = summary.choices?.[0]?.message;
   if (summaryMsg) {
-    state.llmMessages.push(summaryMsg);
+    ctx.llmMessages.push(summaryMsg);
     return summaryMsg.content || "";
   }
   return "I've analyzed the project. Could you paste your .env file so I can configure the environment?";
@@ -193,37 +232,45 @@ async function runAgentLoop(state: SetupState): Promise<string> {
 export async function startSetupSession(projectId: string, userId: string): Promise<string> {
   const project = await prisma.project.findUniqueOrThrow({ where: { id: projectId } });
 
-  // If already active, return existing
-  if (activeSetups.has(projectId)) return projectId;
+  // If sandbox already active on this pod, skip
+  if (activeSandboxes.has(projectId)) return projectId;
+
+  // If another pod is processing, skip
+  const existing = await loadState(projectId);
+  if (existing && existing.isProcessing) return projectId;
 
   const githubAccount = await prisma.oAuthAccount.findFirst({ where: { userId, provider: "github" } });
   if (!githubAccount) throw new Error("GitHub account not linked");
   const [ghEnc, ghIv] = githubAccount.accessToken.split("|");
   const githubToken = decrypt(ghEnc, ghIv);
 
-  const state: SetupState = {
-    sandbox: null as any,
-    llmMessages: [{ role: "system", content: SETUP_SYSTEM_PROMPT }],
-    chatMessages: [],
-    toolCalls: [],
+  // Initialize DB state
+  const initialMessages = existing?.messages ?? [];
+  const initialToolCalls = existing?.toolCalls ?? [];
+  const initialLlmHistory = existing?.llmHistory.length
+    ? existing.llmHistory
+    : [{ role: "system", content: SETUP_SYSTEM_PROMPT }];
+
+  await persistState(projectId, {
+    messages: initialMessages,
+    toolCalls: initialToolCalls,
+    llmHistory: initialLlmHistory,
     status: "Creating sandbox...",
     isProcessing: true,
-  };
-
-  activeSetups.set(projectId, state);
+  });
 
   // Run async — frontend polls for updates
   (async () => {
     try {
-      state.status = "Creating sandbox...";
+      await persistState(projectId, { status: "Creating sandbox..." });
       const sandbox = await Sandbox.create({ timeoutMs: 600_000 });
-      state.sandbox = sandbox;
+      activeSandboxes.set(projectId, sandbox);
 
-      state.status = "Cloning repository...";
+      await persistState(projectId, { status: "Cloning repository..." });
       await sandbox.commands.run(
-    "sudo mkdir -p /workspace && sudo chmod 777 /workspace && git config --global --add safe.directory /workspace",
-    { requestTimeoutMs: 5_000 }
-  );
+        "sudo mkdir -p /workspace && sudo chmod 777 /workspace && git config --global --add safe.directory /workspace",
+        { requestTimeoutMs: 5_000 }
+      );
 
       const cloneResult = await sandbox.commands.run(
         `git clone https://x-access-token:${githubToken}@github.com/${project.githubRepoFullName}.git /workspace`,
@@ -231,85 +278,174 @@ export async function startSetupSession(projectId: string, userId: string): Prom
       );
       if (cloneResult.exitCode !== 0) throw new Error(`Clone failed: ${cloneResult.stderr || cloneResult.stdout}`);
 
-      addChatMsg(state, "SYSTEM", `Repository cloned: ${project.githubRepoFullName}`);
-      state.status = "Analyzing project...";
+      const chatMessages: ChatMsg[] = [...initialMessages];
+      const toolCalls: ToolCallEntry[] = [];
+      const llmMessages = [...initialLlmHistory];
+
+      chatMessages.push({
+        id: crypto.randomUUID(),
+        role: "SYSTEM",
+        content: `Repository cloned: ${project.githubRepoFullName}`,
+        createdAt: new Date().toISOString(),
+      });
+      await persistState(projectId, { messages: chatMessages, status: "Analyzing project..." });
 
       // Initial analysis
-      state.llmMessages.push({
+      llmMessages.push({
         role: "user",
         content: "Analyze this project. Read package.json, .env.example or .env.sample, docker-compose.yml, README.md, and key config files. Then tell me what you found and ask your first question.",
       });
 
-      const response = await runAgentLoop(state);
-      addChatMsg(state, "ASSISTANT", response);
-      await handlePossibleCompletion(projectId, state, response);
+      const ctx: LoopContext = { projectId, sandbox, llmMessages, chatMessages, toolCalls };
+      const response = await runAgentLoop(ctx);
 
-      state.status = "";
-      state.isProcessing = false;
+      ctx.chatMessages.push({
+        id: crypto.randomUUID(),
+        role: "ASSISTANT",
+        content: response,
+        createdAt: new Date().toISOString(),
+      });
+
+      await handlePossibleCompletion(projectId, ctx.chatMessages, response);
+
+      await persistState(projectId, {
+        messages: ctx.chatMessages,
+        toolCalls: ctx.toolCalls,
+        llmHistory: ctx.llmMessages,
+        status: "",
+        isProcessing: false,
+      });
     } catch (e) {
       console.error("[Setup] Failed:", e);
-      addChatMsg(state, "SYSTEM", "Error: " + (e instanceof Error ? e.message : String(e)));
-      state.status = "";
-      state.isProcessing = false;
+      const state = await loadState(projectId);
+      const msgs = state?.messages ?? [];
+      msgs.push({
+        id: crypto.randomUUID(),
+        role: "SYSTEM",
+        content: "Error: " + (e instanceof Error ? e.message : String(e)),
+        createdAt: new Date().toISOString(),
+      });
+      await persistState(projectId, {
+        messages: msgs,
+        status: "",
+        isProcessing: false,
+      });
     }
   })();
 
   return projectId;
 }
 
-export async function sendSetupMessage(setupId: string, content: string): Promise<void> {
-  const state = activeSetups.get(setupId);
-  if (!state) throw new Error("No active setup session");
+export async function sendSetupMessage(projectId: string, content: string): Promise<void> {
+  const state = await loadState(projectId);
+  if (!state) throw new Error("No setup session found");
   if (state.isProcessing) throw new Error("Agent is still processing");
 
-  addChatMsg(state, "USER", content);
-  state.isProcessing = true;
-  state.status = "Thinking...";
+  const sandbox = activeSandboxes.get(projectId);
+  if (!sandbox) throw new Error("No active sandbox. Please refresh to restart setup.");
+
+  const chatMessages = state.messages;
+  const toolCalls: ToolCallEntry[] = [];
+  const llmMessages = state.llmHistory;
+
+  chatMessages.push({
+    id: crypto.randomUUID(),
+    role: "USER",
+    content,
+    createdAt: new Date().toISOString(),
+  });
+  llmMessages.push({ role: "user", content });
+
+  await persistState(projectId, {
+    messages: chatMessages,
+    toolCalls,
+    status: "Thinking...",
+    isProcessing: true,
+  });
 
   try {
-    state.llmMessages.push({ role: "user", content });
-    const response = await runAgentLoop(state);
-    addChatMsg(state, "ASSISTANT", response);
-    await handlePossibleCompletion(setupId, state, response);
+    const ctx: LoopContext = { projectId, sandbox, llmMessages, chatMessages, toolCalls };
+    const response = await runAgentLoop(ctx);
+
+    ctx.chatMessages.push({
+      id: crypto.randomUUID(),
+      role: "ASSISTANT",
+      content: response,
+      createdAt: new Date().toISOString(),
+    });
+
+    await handlePossibleCompletion(projectId, ctx.chatMessages, response);
+
+    await persistState(projectId, {
+      messages: ctx.chatMessages,
+      toolCalls: ctx.toolCalls,
+      llmHistory: ctx.llmMessages,
+      status: "",
+      isProcessing: false,
+    });
   } catch (e) {
     console.error("[Setup] Message error:", e);
-    addChatMsg(state, "SYSTEM", "Error: " + (e instanceof Error ? e.message : String(e)));
+    chatMessages.push({
+      id: crypto.randomUUID(),
+      role: "SYSTEM",
+      content: "Error: " + (e instanceof Error ? e.message : String(e)),
+      createdAt: new Date().toISOString(),
+    });
+    await persistState(projectId, {
+      messages: chatMessages,
+      status: "",
+      isProcessing: false,
+    });
   }
-
-  state.status = "";
-  state.isProcessing = false;
 }
 
 // Check if the response contains [SETUP_COMPLETE]
-async function handlePossibleCompletion(projectId: string, state: SetupState, response: string) {
+async function handlePossibleCompletion(projectId: string, chatMessages: ChatMsg[], response: string) {
   const match = response.match(/\[SETUP_COMPLETE\]\s*([\s\S]*?)\s*\[\/SETUP_COMPLETE\]/);
   if (!match) return;
 
   try {
     const config = JSON.parse(match[1]);
     await applySetupConfig(projectId, config);
-    addChatMsg(state, "SYSTEM", "Project configured successfully! Building template...");
-    await cleanupSetup(projectId);
+    chatMessages.push({
+      id: crypto.randomUUID(),
+      role: "SYSTEM",
+      content: "Project configured successfully! Building template...",
+      createdAt: new Date().toISOString(),
+    });
+    await cleanupSandbox(projectId);
   } catch (err) {
     console.error("Failed to parse setup config:", err);
     const message = err instanceof Error ? err.message : String(err);
-    addChatMsg(
-      state,
-      "SYSTEM",
-      `Couldn't save the setup config. The [SETUP_COMPLETE] block must be valid JSON. ${message.slice(0, 160)}`
-    );
+    chatMessages.push({
+      id: crypto.randomUUID(),
+      role: "SYSTEM",
+      content: `Couldn't save the setup config. The [SETUP_COMPLETE] block must be valid JSON. ${message.slice(0, 160)}`,
+      createdAt: new Date().toISOString(),
+    });
   }
 }
 
-// Poll endpoint returns current state
-export function getSetupState(projectId: string): { messages: ChatMsg[]; toolCalls: ToolCallEntry[]; status: string; isProcessing: boolean } | null {
-  const state = activeSetups.get(projectId);
-  if (!state) return null;
-  return { messages: state.chatMessages, toolCalls: state.toolCalls, status: state.status, isProcessing: state.isProcessing };
+// Poll endpoint — reads from DB so it works across pods
+export async function getSetupState(projectId: string): Promise<{
+  messages: ChatMsg[];
+  toolCalls: ToolCallEntry[];
+  status: string;
+  isProcessing: boolean;
+} | null> {
+  const state = await loadState(projectId);
+  if (!state || (!state.messages.length && !state.isProcessing)) return null;
+  return {
+    messages: state.messages,
+    toolCalls: state.toolCalls,
+    status: state.status,
+    isProcessing: state.isProcessing,
+  };
 }
 
-export function isSetupActive(projectId: string): boolean {
-  return activeSetups.has(projectId);
+export async function isSetupActive(projectId: string): Promise<boolean> {
+  const state = await loadState(projectId);
+  return !!state?.isProcessing;
 }
 
 async function applySetupConfig(projectId: string, config: any) {
@@ -330,8 +466,10 @@ async function applySetupConfig(projectId: string, config: any) {
   buildProjectTemplate(projectId).catch(console.error);
 }
 
-async function cleanupSetup(setupId: string) {
-  const state = activeSetups.get(setupId);
-  if (state?.sandbox) await state.sandbox.kill().catch(() => {});
-  // Don't delete — keep messages available for polling
+async function cleanupSandbox(projectId: string) {
+  const sandbox = activeSandboxes.get(projectId);
+  if (sandbox) {
+    await sandbox.kill().catch(() => {});
+    activeSandboxes.delete(projectId);
+  }
 }

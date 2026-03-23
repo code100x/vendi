@@ -289,7 +289,7 @@ router.post(
       const projectId = getProjectId(req);
       const userId = res.locals.user.id;
 
-      if (isSetupActive(projectId)) {
+      if (await isSetupActive(projectId)) {
         return res.json({ setupId: projectId, status: "already_active" });
       }
 
@@ -338,7 +338,7 @@ router.get(
   requireOrg(),
   async (req: Request, res: Response) => {
     const projectId = getProjectId(req);
-    const state = getSetupState(projectId);
+    const state = await getSetupState(projectId);
     if (!state) {
       return res.json({ active: false, messages: [], status: "", isProcessing: false });
     }

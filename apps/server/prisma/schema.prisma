@@ -119,6 +119,11 @@ model Project {
   templateBuildLog      String?        @db.Text
   maxSessionDurationMin Int            @default(60)
   maxBudgetUsd          Float          @default(5.0)
+  setupMessages         Json?
+  setupToolCalls        Json?
+  setupLlmHistory       Json?
+  setupStatus           String         @default("")
+  setupIsProcessing     Boolean        @default(false)
   createdAt             DateTime       @default(now())
   updatedAt             DateTime       @updatedAt
 
