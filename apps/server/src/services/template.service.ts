@@ -52,8 +52,8 @@ RUN mkdir -p /workspace && chmod 777 /workspace \\
 
     await Template.build(template, {
       alias: templateAlias,
-      cpuCount: 2,
-      memoryMB: 2048,
+      cpuCount: 8,
+      memoryMB: 8192,
       onBuildLogs: (logEntry) => {
         if (logEntry && typeof logEntry === "object" && "message" in logEntry) {
           const msg = (logEntry as any).message;
