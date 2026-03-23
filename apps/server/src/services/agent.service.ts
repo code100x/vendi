@@ -274,11 +274,12 @@ async function runCodexCommand(
   ];
 
   // Pipe stdout to a log file so we can poll it for live progress
+  // stdbuf -oL forces line buffering so each JSON event flushes immediately
   const command =
     `cd /workspace && ` +
     `OPENAI_API_KEY=${shellEscape(env.OPENAI_API_KEY || "")} ` +
     `HOME=${shellEscape(CODEX_HOME_DIR)} ` +
-    `${baseArgs.map(shellEscape).join(" ")} < ${shellEscape(promptPath)} | tee ${shellEscape(logPath)}`;
+    `stdbuf -oL ${baseArgs.map(shellEscape).join(" ")} < ${shellEscape(promptPath)} | tee ${shellEscape(logPath)}`;
   try {
     const result = await sandbox.commands.run(command, {
       requestTimeoutMs: 20 * 60 * 1000,
