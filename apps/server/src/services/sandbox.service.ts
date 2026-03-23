@@ -37,7 +37,7 @@ export async function startSessionSandbox(
   // Create sandbox from the project's built template
   const sandbox = await Sandbox.create(project.e2bTemplateId, {
     timeoutMs: project.maxSessionDurationMin * 60 * 1000,
-    cpuCount: 4,
+    cpuCount: 8,
     memoryMB: 8192,
     envs: {
       GITHUB_TOKEN: githubToken,
