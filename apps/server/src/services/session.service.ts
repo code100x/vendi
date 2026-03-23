@@ -104,6 +104,13 @@ const sessionLocks = new Set<string>();
 const AGENT_RUN_STALE_MS = 10 * 60 * 1000; // 10 minutes
 
 export async function sendMessage(sessionId: string, content: string, options?: { hidden?: boolean }) {
+  // Save user message to DB IMMEDIATELY so it appears in the UI right away
+  if (!options?.hidden) {
+    await prisma.chatMessage.create({
+      data: { sessionId, role: "USER", content },
+    });
+  }
+
   // Wait for any in-memory lock on this pod
   while (sessionLocks.has(sessionId)) {
     await new Promise((r) => setTimeout(r, 1000));
@@ -120,7 +127,7 @@ export async function sendMessage(sessionId: string, content: string, options?: 
         if (!recovered) {
           // Still running — wait a bit and retry
           await new Promise((r) => setTimeout(r, 3000));
-          return sendMessage(sessionId, content, options);
+          return sendMessage(sessionId, content, { ...options, hidden: true }); // already saved above
         }
       }
     } else {
@@ -140,7 +147,7 @@ export async function sendMessage(sessionId: string, content: string, options?: 
   sessionLocks.add(sessionId);
 
   try {
-    return await _sendMessage(sessionId, content, options);
+    return await _sendMessage(sessionId, content, { ...options, hidden: true }); // already saved above
   } finally {
     sessionLocks.delete(sessionId);
   }
