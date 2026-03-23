@@ -125,14 +125,21 @@ function ChatBubble({ message }: { message: ChatMessage }) {
   const toolCalls = message.metadata?.toolCalls;
 
   if (message.role === "SYSTEM") {
-    const isWorking = message.content.includes("working on it") ||
+    const systemToolCalls = toolCalls;
+    const hasToolCalls = systemToolCalls && systemToolCalls.length > 0;
+    const isWorking = hasToolCalls ||
+      message.content.includes("working on it") ||
+      message.content.includes("Working on it") ||
       message.content.includes("Setting up") ||
       message.content.includes("Installing") ||
       message.content.includes("Modifying files") ||
       message.content.includes("Dev server") ||
-      message.content.includes("Compiling");
-    const systemToolCalls = toolCalls;
-    const hasToolCalls = systemToolCalls && systemToolCalls.length > 0;
+      message.content.includes("Compiling") ||
+      message.content.includes("Reading files") ||
+      message.content.includes("Writing files") ||
+      message.content.includes("Browsing project") ||
+      message.content.includes("Searching code") ||
+      message.content.includes("Running commands");
 
     // "Working" messages always get the enhanced UI with bouncing dots
     if (isWorking) {
