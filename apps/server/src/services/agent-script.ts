@@ -128,7 +128,7 @@ async function callLLM(msgs) {
         Authorization: \`Bearer \${llmApiKey}\`,
         "X-Title": "Vendi",
       },
-      body: JSON.stringify({ model: llmModel, messages: msgs, tools, max_tokens: 4096 }),
+      body: JSON.stringify({ model: llmModel, messages: msgs, tools, max_tokens: 4096, parallel_tool_calls: true }),
       signal: controller.signal,
     });
     if (!res.ok) throw new Error(\`LLM error \${res.status}: \${await res.text()}\`);

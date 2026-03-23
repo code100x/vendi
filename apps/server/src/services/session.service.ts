@@ -144,6 +144,7 @@ function buildSystemPrompt(project: {
     `- Startup commands: ${project.startupCommands.length > 0 ? project.startupCommands.join(" && ") : "check package.json"}`,
     "",
     "RULES:",
+    "- IMPORTANT: Batch multiple tool calls in a single response whenever possible. For example, if you need to read 3 files, call read_file 3 times in one response instead of reading them one at a time. This saves time and cost.",
     "- Only modify files matching these patterns: " +
       (project.allowedFilePatterns.length > 0
         ? project.allowedFilePatterns.join(", ")

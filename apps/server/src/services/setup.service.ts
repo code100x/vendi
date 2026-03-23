@@ -103,6 +103,7 @@ OUTPUT FORMAT — when you have everything:
 [/SETUP_COMPLETE]
 
 RULES:
+- IMPORTANT: Batch multiple tool calls in a single response whenever possible. For example, read package.json, .env.example, and docker-compose.yml all in one response instead of one at a time. This saves time and cost.
 - ALWAYS read the codebase FIRST before saying anything to the user
 - Do NOT ask the user about services, ports, startup commands, or file patterns — detect them yourself
 - Do NOT ask about or suggest code changes — this is setup, not development
@@ -160,7 +161,7 @@ async function callLLM(messages: any[]): Promise<any> {
       Authorization: `Bearer ${key}`,
       "X-Title": "Vendi",
     },
-    body: JSON.stringify({ model, messages, tools, max_tokens: 4096 }),
+    body: JSON.stringify({ model, messages, tools, max_tokens: 4096, parallel_tool_calls: true }),
   });
   if (!res.ok) throw new Error(`LLM error ${res.status}: ${await res.text()}`);
   const json = await res.json();
