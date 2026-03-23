@@ -40,6 +40,14 @@ async function buildConversationHistory(sessionId: string): Promise<any[]> {
 }
 
 function getLLMConfig() {
+  if (env.LLM_PROVIDER === "vercel") {
+    if (!env.AI_GATEWAY_API_KEY) throw new Error("AI_GATEWAY_API_KEY not set");
+    return {
+      llmBaseUrl: "https://ai-gateway.vercel.sh/v1/chat/completions",
+      llmApiKey: env.AI_GATEWAY_API_KEY,
+      llmModel: "openai/gpt-4.1",
+    };
+  }
   if (env.LLM_PROVIDER === "openai") {
     if (!env.OPENAI_API_KEY) throw new Error("OPENAI_API_KEY not set");
     return {

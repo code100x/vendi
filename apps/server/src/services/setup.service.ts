@@ -6,6 +6,10 @@ import { env } from "../config/env";
 import { buildProjectTemplate } from "./template.service";
 
 function getLLMConfig() {
+  if (env.LLM_PROVIDER === "vercel") {
+    if (!env.AI_GATEWAY_API_KEY) throw new Error("AI_GATEWAY_API_KEY not set");
+    return { url: "https://ai-gateway.vercel.sh/v1/chat/completions", key: env.AI_GATEWAY_API_KEY, model: "openai/gpt-4.1" };
+  }
   if (env.LLM_PROVIDER === "openai") {
     if (!env.OPENAI_API_KEY) throw new Error("OPENAI_API_KEY not set");
     return { url: "https://api.openai.com/v1/chat/completions", key: env.OPENAI_API_KEY, model: "gpt-4.1" };
