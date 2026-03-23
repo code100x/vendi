@@ -68,6 +68,8 @@ async function getSandbox(projectId: string): Promise<Sandbox> {
 
 const SETUP_SYSTEM_PROMPT = `You are a project setup assistant for Vendi. Your job is to analyze a project's codebase and automatically configure it for running in a sandbox environment.
 
+The project is cloned at /workspace. ALWAYS use absolute paths starting with /workspace/ when reading files (e.g. /workspace/package.json, /workspace/docker-compose.yml).
+
 YOUR GOAL:
 Automatically detect the project configuration by reading files. Then ask the developer ONLY for their environment variable values (the .env file contents). Do NOT ask about code changes, architecture decisions, or how the project should be modified.
 
@@ -370,7 +372,7 @@ export async function startSetupSession(projectId: string, userId: string): Prom
       // Initial analysis
       llmMessages.push({
         role: "user",
-        content: "Analyze this project. Read package.json, .env.example or .env.sample, docker-compose.yml, README.md, and key config files. Then tell me what you found and ask your first question.",
+        content: "Analyze the project at /workspace. Start by reading /workspace/package.json, /workspace/.env.example or /workspace/.env.sample, /workspace/docker-compose.yml, /workspace/README.md, and other key config files. Use list_files on /workspace first to see what exists. Then tell me what you found and ask your first question.",
       });
 
       const ctx: LoopContext = { projectId, sandbox, llmMessages, chatMessages, toolCalls };
