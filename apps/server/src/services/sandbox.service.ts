@@ -38,7 +38,7 @@ export async function startSessionSandbox(
   const sandbox = await Sandbox.create(project.e2bTemplateId, {
     timeoutMs: project.maxSessionDurationMin * 60 * 1000,
     cpuCount: 4,
-    memoryMb: 8192,
+    memoryMB: 8192,
     envs: {
       GITHUB_TOKEN: githubToken,
       ...(env.OPENAI_API_KEY ? { OPENAI_API_KEY: env.OPENAI_API_KEY } : {}),
