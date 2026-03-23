@@ -1,10 +1,7 @@
-import { Sandbox } from "e2b";
 import { prisma } from "../lib/prisma";
 import { startSessionSandbox, stopSandbox, pushChangesFromSandbox } from "./sandbox.service";
 import { createPullRequest, mergePullRequest, deleteBranch } from "./github.service";
-import { runAgentTurn, recoverAgentRun } from "./agent.service";
-import type { WsServerMessage } from "@vendi/shared";
-import type { Session } from "@prisma/client";
+import { runAgentTurn } from "./agent.service";
 
 export async function startSession(projectId: string, userId: string) {
   // Check project is ready
@@ -97,11 +94,8 @@ If anything fails, fix it yourself. Keep messages short and non-technical.`;
   }
 }
 
-// In-memory lock per session on this pod (fast path to avoid DB contention)
+// In-memory lock per session on this pod
 const sessionLocks = new Set<string>();
-
-// Max time we'll wait for a stale agent run before assuming the pod crashed
-const AGENT_RUN_STALE_MS = 10 * 60 * 1000; // 10 minutes
 
 export async function sendMessage(sessionId: string, content: string, options?: { hidden?: boolean }) {
   // Save user message to DB IMMEDIATELY so it appears in the UI right away
@@ -116,89 +110,30 @@ export async function sendMessage(sessionId: string, content: string, options?: 
     await new Promise((r) => setTimeout(r, 1000));
   }
 
-  // Check DB for an in-flight agent run (may be on another pod)
-  const session = await prisma.session.findUniqueOrThrow({ where: { id: sessionId } });
-  if (session.agentRunId) {
-    const runAge = Date.now() - (session.agentRunStartedAt?.getTime() || 0);
-    if (runAge < AGENT_RUN_STALE_MS) {
-      // Another pod is still processing — try to recover its result
-      if (session.sandboxId) {
-        const recovered = await tryRecoverAgentRun(session);
-        if (!recovered) {
-          // Still running — wait a bit and retry
-          await new Promise((r) => setTimeout(r, 3000));
-          return sendMessage(sessionId, content, { ...options, hidden: true }); // already saved above
-        }
-      }
-    } else {
-      // Stale run — the pod likely crashed. Clean up.
-      console.log(`[Session] Clearing stale agent run ${session.agentRunId} for session ${sessionId}`);
-      await prisma.session.update({
-        where: { id: sessionId },
-        data: { agentRunId: null, agentWorkingMsgId: null, agentRunStartedAt: null },
-      });
-      // Delete the stale "working" message
-      if (session.agentWorkingMsgId) {
-        await prisma.chatMessage.delete({ where: { id: session.agentWorkingMsgId } }).catch(() => {});
-      }
-    }
-  }
-
   sessionLocks.add(sessionId);
 
   try {
-    return await _sendMessage(sessionId, content, { ...options, hidden: true }); // already saved above
+    const session = await prisma.session.findUniqueOrThrow({
+      where: { id: sessionId },
+      include: { project: true },
+    });
+
+    if (session.status !== "RUNNING" || !session.sandboxId) {
+      throw new Error("Session is not active");
+    }
+
+    const systemPrompt = buildSystemPrompt(session.project);
+
+    await runAgentTurn({
+      sessionId,
+      sandboxId: session.sandboxId,
+      userMessage: content,
+      systemPrompt,
+      maxBudgetUsd: session.project.maxBudgetUsd,
+    });
   } finally {
     sessionLocks.delete(sessionId);
   }
-}
-
-/** Try to recover a Codex run from a crashed pod by checking if it finished */
-async function tryRecoverAgentRun(session: Session): Promise<boolean> {
-  if (!session.sandboxId || !session.agentRunId) return false;
-  try {
-    const recovered = await recoverAgentRun(session.id, session.sandboxId, session.agentRunId, session.agentWorkingMsgId);
-    if (recovered) {
-      await prisma.session.update({
-        where: { id: session.id },
-        data: { agentRunId: null, agentWorkingMsgId: null, agentRunStartedAt: null },
-      });
-    }
-    return recovered;
-  } catch (e) {
-    console.error("[Session] Recovery failed:", e);
-    return false;
-  }
-}
-
-async function _sendMessage(sessionId: string, content: string, options?: { hidden?: boolean }) {
-  const session = await prisma.session.findUniqueOrThrow({
-    where: { id: sessionId },
-    include: { project: true },
-  });
-
-  if (session.status !== "RUNNING" || !session.sandboxId) {
-    throw new Error("Session is not active");
-  }
-
-  // Save user message to DB (polling will pick it up) — skip for hidden messages
-  if (!options?.hidden) {
-    await prisma.chatMessage.create({
-      data: { sessionId, role: "USER", content },
-    });
-  }
-
-  // Build system prompt
-  const systemPrompt = buildSystemPrompt(session.project);
-
-  // Run Codex inside the sandbox
-  await runAgentTurn({
-    sessionId,
-    sandboxId: session.sandboxId,
-    userMessage: content,
-    systemPrompt,
-    maxBudgetUsd: session.project.maxBudgetUsd,
-  });
 }
 
 function buildSystemPrompt(project: {

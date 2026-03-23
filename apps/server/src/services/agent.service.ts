@@ -1,8 +1,12 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { Sandbox } from "e2b";
 import { prisma } from "../lib/prisma";
 import { env } from "../config/env";
 import type { ToolCallEntry } from "@vendi/shared";
+
+const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
+const MODEL = "anthropic/claude-sonnet-4";
+const MAX_ITERATIONS = 50;
 
 interface AgentRunConfig {
   sessionId: string;
@@ -12,105 +16,121 @@ interface AgentRunConfig {
   maxBudgetUsd: number;
 }
 
-const CODEX_STATE_DIR = "/workspace/.vendi";
-const READY_MARKER = `${CODEX_STATE_DIR}/codex-ready`;
-const MODEL_FILE = `${CODEX_STATE_DIR}/model.txt`;
-const CODEX_HOME_DIR = `${CODEX_STATE_DIR}/home`;
-const CODEX_AUTH_FILE = `${CODEX_HOME_DIR}/.codex/auth.json`;
-const OPENAI_KEY_FINGERPRINT_FILE = `${CODEX_STATE_DIR}/openai-key.sha256`;
-const PREFERRED_MODEL = "gpt-5.4";
-const FALLBACK_MODELS = ["gpt-5.3-codex"];
-const REASONING_EFFORT = "high";
-const OPENAI_MODELS_URL = "https://api.openai.com/v1/models";
-const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
+// ── Tool definitions (OpenAI function-calling format) ─────────────────────────
 
-interface CommandResult {
-  exitCode: number;
-  stdout: string;
-  stderr: string;
-}
+const tools = [
+  {
+    type: "function" as const,
+    function: {
+      name: "read_file",
+      description: "Read a file from the project",
+      parameters: { type: "object", properties: { path: { type: "string", description: "Absolute path to the file" } }, required: ["path"] },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "write_file",
+      description: "Write or create a file in the project",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Absolute path to the file" },
+          content: { type: "string", description: "Full file content to write" },
+        },
+        required: ["path", "content"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "list_files",
+      description: "List files in a directory (up to 3 levels deep, max 80 entries)",
+      parameters: { type: "object", properties: { path: { type: "string", description: "Directory path" } }, required: ["path"] },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "search_code",
+      description: "Search for a regex pattern across project source files",
+      parameters: { type: "object", properties: { pattern: { type: "string", description: "Grep-compatible regex pattern" } }, required: ["pattern"] },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "run_command",
+      description: "Run a shell command in /workspace (60s timeout)",
+      parameters: { type: "object", properties: { command: { type: "string", description: "Shell command to execute" } }, required: ["command"] },
+    },
+  },
+];
 
-function shellEscape(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
-}
+// ── Tool execution ────────────────────────────────────────────────────────────
 
-async function ensureStateDir(sandbox: Sandbox): Promise<void> {
-  await sandbox.commands.run(`mkdir -p ${CODEX_STATE_DIR} ${CODEX_HOME_DIR}`, {
-    requestTimeoutMs: 10_000,
-  });
-}
-
-function getOpenAIKeyFingerprint(): string {
-  return createHash("sha256").update(env.OPENAI_API_KEY || "").digest("hex");
-}
-
-async function ensureCodexAuth(sandbox: Sandbox): Promise<void> {
-  const existingFingerprint = (await readIfExists(sandbox, OPENAI_KEY_FINGERPRINT_FILE)).trim();
-  const currentFingerprint = getOpenAIKeyFingerprint();
-
-  if (existingFingerprint === currentFingerprint) {
-    try {
-      const result = await sandbox.commands.run(`test -f ${CODEX_AUTH_FILE}`, {
-        requestTimeoutMs: 5_000,
-      });
-      if (result.exitCode === 0) return;
-    } catch (error: any) {
-      if (error?.result?.exitCode !== 1) throw error;
+async function executeTool(sandbox: Sandbox, name: string, args: Record<string, string>): Promise<string> {
+  try {
+    switch (name) {
+      case "read_file":
+        return String(await sandbox.files.read(args.path));
+      case "write_file":
+        await sandbox.files.write(args.path, args.content);
+        return "File written successfully.";
+      case "list_files": {
+        const r = await sandbox.commands.run(
+          `find ${args.path} -maxdepth 3 -type f 2>/dev/null | head -80`,
+          { requestTimeoutMs: 10_000 },
+        );
+        return r.stdout || "No files found";
+      }
+      case "search_code": {
+        const escaped = args.pattern.replace(/"/g, '\\"');
+        const r = await sandbox.commands.run(
+          `cd /workspace && grep -rn "${escaped}" --include="*.ts" --include="*.tsx" --include="*.js" --include="*.jsx" --include="*.json" --include="*.css" --include="*.html" --include="*.env*" --include="*.yml" --include="*.yaml" --include="*.md" --include="*.prisma" 2>/dev/null | head -50`,
+          { requestTimeoutMs: 10_000 },
+        );
+        return r.stdout || "No matches";
+      }
+      case "run_command": {
+        const r = await sandbox.commands.run(`cd /workspace && ${args.command}`, {
+          requestTimeoutMs: 60_000,
+        });
+        const out = (r.stdout + (r.stderr ? "\n" + r.stderr : "")).trim();
+        return (out || `Exit code: ${r.exitCode}`).slice(0, 4000);
+      }
+      default:
+        return "Unknown tool";
     }
+  } catch (e) {
+    return `Error: ${e instanceof Error ? e.message : String(e)}`;
   }
+}
 
-  const loginCommand =
-    `cd /workspace && mkdir -p ${shellEscape(CODEX_HOME_DIR)} && ` +
-    `OPENAI_API_KEY=${shellEscape(env.OPENAI_API_KEY || "")} ` +
-    `HOME=${shellEscape(CODEX_HOME_DIR)} ` +
-    `bash -lc ${shellEscape('printf %s "$OPENAI_API_KEY" | codex login --with-api-key')}`;
+// ── LLM call ──────────────────────────────────────────────────────────────────
 
-  const result = await sandbox.commands.run(loginCommand, {
-    requestTimeoutMs: 120_000,
+async function callLLM(messages: any[]): Promise<any> {
+  const res = await fetch(OPENROUTER_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${env.OPENROUTER_API_KEY}`,
+      "X-Title": "Vendi",
+    },
+    body: JSON.stringify({ model: MODEL, messages, tools, max_tokens: 4096 }),
   });
-
-  if (result.exitCode !== 0) {
-    const failure = [result.stderr, result.stdout].find(Boolean)?.trim() || "Codex login failed.";
-    throw new Error(failure.slice(0, 1000));
-  }
-
-  await sandbox.files.write(OPENAI_KEY_FINGERPRINT_FILE, currentFingerprint);
+  if (!res.ok) throw new Error(`OpenRouter error ${res.status}: ${await res.text()}`);
+  return res.json();
 }
 
-async function hasExistingSession(sandbox: Sandbox): Promise<boolean> {
-  try {
-    const result = await sandbox.commands.run(`test -f ${READY_MARKER}`, {
-      requestTimeoutMs: 5_000,
-    });
-    return result.exitCode === 0;
-  } catch (error: any) {
-    if (error?.result?.exitCode === 1) return false;
-    throw error;
-  }
-}
-
-async function readIfExists(sandbox: Sandbox, path: string): Promise<string> {
-  try {
-    return String(await sandbox.files.read(path));
-  } catch {
-    return "";
-  }
-}
-
-async function getSessionModels(sandbox: Sandbox): Promise<string[]> {
-  const savedModel = (await readIfExists(sandbox, MODEL_FILE)).trim();
-  if (savedModel) return [savedModel];
-  return [PREFERRED_MODEL, ...FALLBACK_MODELS];
-}
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 async function listChangedFiles(sandbox: Sandbox): Promise<string[]> {
-  const result = await sandbox.commands.run(
-    "cd /workspace && git status --porcelain",
-    { requestTimeoutMs: 10_000 }
-  );
-
+  const result = await sandbox.commands.run("cd /workspace && git status --porcelain", {
+    requestTimeoutMs: 10_000,
+  });
   if (!result.stdout) return [];
-
   return result.stdout
     .split("\n")
     .map((line: string) => line.trim())
@@ -120,376 +140,171 @@ async function listChangedFiles(sandbox: Sandbox): Promise<string[]> {
     .slice(0, 50);
 }
 
-/**
- * Parse Codex --json stdout to extract structured tool call events.
- * Codex outputs newline-delimited JSON; we look for function_call / function_call_output pairs.
- */
-function parseCodexToolCalls(stdout: string): ToolCallEntry[] {
-  if (!stdout) return [];
+/** Load previous chat messages and convert to LLM message format */
+async function buildConversationHistory(sessionId: string): Promise<any[]> {
+  const messages = await prisma.chatMessage.findMany({
+    where: { sessionId },
+    orderBy: { createdAt: "asc" },
+  });
 
-  const toolCalls: ToolCallEntry[] = [];
-  const pending = new Map<string, { name: string; args: Record<string, string> }>();
-
-  for (const line of stdout.split("\n")) {
-    if (!line.trim()) continue;
-    try {
-      const raw = JSON.parse(line);
-      // Handle both direct events and events wrapped in an "item" envelope
-      const event = raw.item || raw;
-
-      if (event.type === "function_call") {
-        const callId = event.call_id || event.id || randomUUID();
-        let args: Record<string, string> = {};
-        try {
-          const parsed = JSON.parse(event.arguments || "{}");
-          for (const [k, v] of Object.entries(parsed)) {
-            args[k] = Array.isArray(v) ? v.join(" ") : String(v);
-          }
-        } catch {
-          args = { raw: event.arguments || "" };
-        }
-        pending.set(callId, { name: event.name || "unknown", args });
-      } else if (event.type === "function_call_output") {
-        const callId = event.call_id || event.id;
-        const entry = pending.get(callId);
-        if (entry) {
-          toolCalls.push({
-            id: callId,
-            name: entry.name,
-            args: entry.args,
-            result: String(event.output || "").slice(0, 3000),
-            timestamp: new Date().toISOString(),
-          });
-          pending.delete(callId);
-        }
-      }
-    } catch {
-      // Skip non-JSON lines
+  const history: any[] = [];
+  for (const msg of messages) {
+    if (msg.role === "USER") {
+      history.push({ role: "user", content: msg.content });
+    } else if (msg.role === "ASSISTANT") {
+      history.push({ role: "assistant", content: msg.content });
     }
+    // Skip SYSTEM messages (UI-only status messages)
   }
-
-  // Flush remaining calls that had no output
-  for (const [callId, entry] of pending) {
-    toolCalls.push({
-      id: callId,
-      name: entry.name,
-      args: entry.args,
-      result: "",
-      timestamp: new Date().toISOString(),
-    });
-  }
-
-  return toolCalls;
+  return history;
 }
 
-function buildPrompt(systemPrompt: string, userMessage: string, maxBudgetUsd: number): string {
-  return [
-    systemPrompt,
-    "",
-    "OPERATION RULES:",
-    `- Keep working until the request is complete or you need a concrete answer from the user.`,
-    `- Budget target: $${maxBudgetUsd.toFixed(2)}.`,
-    "- Keep user-facing updates brief and non-technical.",
-    "- If you need clarification, ask one focused question at the end.",
-    "- For long-running dev servers, launch them in a detached way so they survive after this Codex turn exits.",
-    "- Prefer `nohup ... >/tmp/<name>.log 2>&1 < /dev/null &` or `setsid ... >/tmp/<name>.log 2>&1 < /dev/null &` for dev servers.",
-    "- Do not leave the task blocked on an attached foreground server process.",
-    "- After starting a dev server, verify it with curl on the expected port before reporting success.",
-    "- If the task involves creating or fixing env files, inspect the codebase for the exact env names it reads before replying.",
-    "- Infer obvious aliases instead of asking the user again. Example: add `VITE_GITHUB_CLIENT_ID` from `GITHUB_CLIENT_ID` when the frontend reads the `VITE_` name.",
-    "- Only ask for an env value when it is truly distinct and cannot be derived safely from what already exists.",
-    "",
-    "USER REQUEST:",
-    userMessage,
-  ].join("\n");
-}
-
-async function diagnoseOpenAIFailure(): Promise<string | null> {
-  if (!env.OPENAI_API_KEY) return "OPENAI_API_KEY is not set on the server.";
-
-  const headers = {
-    Authorization: `Bearer ${env.OPENAI_API_KEY}`,
-    "Content-Type": "application/json",
-  };
-
-  try {
-    const modelsRes = await fetch(OPENAI_MODELS_URL, {
-      method: "GET",
-      headers,
-    });
-
-    if (!modelsRes.ok) {
-      const body = await modelsRes.text();
-      return `OpenAI auth check failed (${modelsRes.status}). ${body.slice(0, 300)}`;
-    }
-
-    const responsesRes = await fetch(OPENAI_RESPONSES_URL, {
-      method: "POST",
-      headers,
-      body: JSON.stringify({
-        model: "gpt-5.4-mini",
-        input: "Reply with exactly OK.",
-      }),
-    });
-
-    if (responsesRes.ok) return null;
-
-    const body = await responsesRes.text();
-    if (responsesRes.status === 429 && body.includes("insufficient_quota")) {
-      return "The OpenAI API key is valid, but the project has no usable Responses quota right now.";
-    }
-
-    return `OpenAI Responses check failed (${responsesRes.status}). ${body.slice(0, 300)}`;
-  } catch (error) {
-    return error instanceof Error ? error.message : String(error);
-  }
-}
-
-async function runCodexCommand(
-  sandbox: Sandbox,
-  model: string,
-  promptPath: string,
-  outputPath: string,
-  logPath: string,
-  resume: boolean
-): Promise<CommandResult & { logPath: string }> {
-
-  const baseArgs = [
-    "codex",
-    "exec",
-    ...(resume ? ["resume", "--last"] : []),
-    "--json",
-    "--dangerously-bypass-approvals-and-sandbox",
-    "--model",
-    model,
-    "-c",
-    `model_reasoning_effort="${REASONING_EFFORT}"`,
-    "-c",
-    'experimental_realtime_ws_mode="disabled"',
-    ...(resume ? [] : ["-C", "/workspace"]),
-    "--skip-git-repo-check",
-    "--output-last-message",
-    outputPath,
-    "-",
-  ];
-
-  const command =
-    `cd /workspace && ` +
-    `OPENAI_API_KEY=${shellEscape(env.OPENAI_API_KEY || "")} ` +
-    `HOME=${shellEscape(CODEX_HOME_DIR)} ` +
-    `${baseArgs.map(shellEscape).join(" ")} < ${shellEscape(promptPath)}`;
-  try {
-    const result = await sandbox.commands.run(command, {
-      requestTimeoutMs: 20 * 60 * 1000,
-      timeoutMs: 0,
-    });
-    return { ...result, logPath };
-  } catch (error: any) {
-    if (error?.result) return { ...error.result as CommandResult, logPath };
-    throw error;
-  }
-}
+// ── Main agent loop ───────────────────────────────────────────────────────────
 
 export async function runAgentTurn(config: AgentRunConfig): Promise<void> {
-  const { sessionId, sandboxId, userMessage, systemPrompt, maxBudgetUsd } = config;
+  const { sessionId, sandboxId, userMessage, systemPrompt } = config;
 
-  if (!env.OPENAI_API_KEY) throw new Error("OPENAI_API_KEY not set");
+  if (!env.OPENROUTER_API_KEY) throw new Error("OPENROUTER_API_KEY not set");
 
   const sandbox = await Sandbox.connect(sandboxId);
-  await ensureStateDir(sandbox);
-  await ensureCodexAuth(sandbox);
 
-  const runId = randomUUID();
-  const promptPath = `${CODEX_STATE_DIR}/prompt-${runId}.txt`;
-  const outputPath = `${CODEX_STATE_DIR}/last-message-${runId}.txt`;
+  // Build LLM conversation: system prompt + history + current message
+  const conversationHistory = await buildConversationHistory(sessionId);
+  const llmMessages: any[] = [
+    { role: "system", content: systemPrompt },
+    ...conversationHistory,
+    { role: "user", content: userMessage },
+  ];
 
-  const prompt = buildPrompt(systemPrompt, userMessage, maxBudgetUsd);
-  await sandbox.files.write(promptPath, prompt);
-
+  // Create "working" placeholder visible to frontend
   const workingMsg = await prisma.chatMessage.create({
     data: {
       sessionId,
       role: "SYSTEM",
-      content: "Codex is working on it...",
+      content: "Working on it...",
     },
   });
 
-  // Track run in DB so other pods can detect/recover it
-  await prisma.session.update({
-    where: { id: sessionId },
-    data: { agentRunId: runId, agentWorkingMsgId: workingMsg.id, agentRunStartedAt: new Date() },
-  });
+  const allToolCalls: ToolCallEntry[] = [];
 
-  let result: (CommandResult & { logPath: string }) | null = null;
-  const resume = await hasExistingSession(sandbox);
-  const models = await getSessionModels(sandbox);
-  let chosenModel = models[0];
+  try {
+    let iterations = 0;
+    let finalText = "";
 
-  for (let index = 0; index < models.length; index++) {
-    const model = models[index]!;
-    const shouldResume = index === 0 ? resume : false;
+    while (iterations < MAX_ITERATIONS) {
+      iterations++;
+      console.log(`[Agent] Session ${sessionId} — iteration ${iterations}`);
 
-    // Lightweight poll: single command every 10s to show activity without overloading sandbox
-    const logPath = `${CODEX_STATE_DIR}/codex-log-${runId}.jsonl`;
-    let lastStatus = "";
-    const pollInterval = setInterval(async () => {
-      try {
-        const r = await sandbox.commands.run(
-          "cd /workspace && echo FILES=$(git diff --name-only HEAD 2>/dev/null | wc -l) && echo PROCS=$(ps -eo comm 2>/dev/null | grep -cE '(node|yarn|npm|bun|vite|next|turbo)' || echo 0)",
-          { requestTimeoutMs: 8_000 }
-        );
-        const output = r.stdout || "";
-        const fileCount = parseInt(output.match(/FILES=(\d+)/)?.[1] || "0", 10);
-        const procCount = parseInt(output.match(/PROCS=(\d+)/)?.[1] || "0", 10);
+      const data = await callLLM(llmMessages);
+      const msg = data.choices?.[0]?.message;
+      if (!msg) throw new Error("No LLM response");
 
-        let status = "Codex is working on it...";
-        if (procCount > 0 && fileCount === 0) status = "Installing dependencies...";
-        else if (procCount > 0 && fileCount > 0) status = `Dev server running (${fileCount} files changed)...`;
-        else if (fileCount > 0) status = `Modifying files (${fileCount} changed)...`;
+      llmMessages.push(msg);
 
-        if (status !== lastStatus) {
-          lastStatus = status;
-          await prisma.chatMessage.update({
-            where: { id: workingMsg.id },
-            data: { content: status },
+      // ── Tool calls ──────────────────────────────────────────────────
+      if (msg.tool_calls && msg.tool_calls.length > 0) {
+        for (const tc of msg.tool_calls) {
+          const { name, arguments: argsStr } = tc.function;
+
+          // Update status text
+          const statusMap: Record<string, string> = {
+            read_file: "Reading files...",
+            write_file: "Writing files...",
+            list_files: "Browsing project...",
+            search_code: "Searching code...",
+            run_command: "Running commands...",
+          };
+
+          let args: Record<string, string>;
+          try { args = JSON.parse(argsStr); } catch { args = {}; }
+
+          const result = await executeTool(sandbox, name, args);
+
+          allToolCalls.push({
+            id: randomUUID(),
+            name,
+            args: sanitizeArgs(args),
+            result: result.slice(0, 2000),
+            timestamp: new Date().toISOString(),
           });
+
+          llmMessages.push({ role: "tool", tool_call_id: tc.id, content: result });
         }
-      } catch {
-        // Ignore — sandbox might be busy
+
+        // Update working message with live tool calls + status
+        const latestTool = msg.tool_calls[msg.tool_calls.length - 1];
+        const latestName = latestTool?.function?.name || "";
+        const statusMap: Record<string, string> = {
+          read_file: "Reading files...",
+          write_file: "Writing files...",
+          list_files: "Browsing project...",
+          search_code: "Searching code...",
+          run_command: "Running commands...",
+        };
+        await prisma.chatMessage.update({
+          where: { id: workingMsg.id },
+          data: {
+            content: statusMap[latestName] || "Working on it...",
+            metadata: JSON.parse(JSON.stringify({ toolCalls: allToolCalls })),
+          },
+        });
+
+        continue;
       }
-    }, 10_000);
 
-    const attempt = await runCodexCommand(sandbox, model, promptPath, outputPath, logPath, shouldResume);
-    clearInterval(pollInterval);
-
-    if (attempt.exitCode === 0) {
-      result = attempt;
-      chosenModel = model;
+      // ── Text response — done ────────────────────────────────────────
+      finalText = msg.content || "";
       break;
     }
 
-    const failureText = [attempt.stderr, attempt.stdout].find(Boolean)?.trim() || "";
-    const canFallback =
-      index < models.length - 1 &&
-      !resume &&
-      failureText.includes("responses_websocket");
-
-    if (!canFallback) {
-      result = attempt;
-      chosenModel = model;
-      break;
+    if (!finalText && iterations >= MAX_ITERATIONS) {
+      // Force a summary
+      llmMessages.push({
+        role: "user",
+        content: "You've used many tool calls. Please summarize what you've done and what the current state is.",
+      });
+      const summary = await callLLM(llmMessages);
+      const summaryMsg = summary.choices?.[0]?.message;
+      finalText = summaryMsg?.content || "Done.";
     }
 
-    await prisma.chatMessage.create({
-      data: {
-        sessionId,
-        role: "SYSTEM",
-        content: `Codex hit a model transport issue on ${model}. Retrying with ${models[index + 1]}.`,
-      },
-    });
-  }
+    // Remove working placeholder
+    await prisma.chatMessage.delete({ where: { id: workingMsg.id } }).catch(() => {});
 
-  if (!result) throw new Error("Codex did not return a result.");
-
-  // Remove the "working" placeholder and clear run tracking
-  await prisma.chatMessage.delete({ where: { id: workingMsg.id } }).catch(() => {});
-  await prisma.session.update({
-    where: { id: sessionId },
-    data: { agentRunId: null, agentWorkingMsgId: null, agentRunStartedAt: null },
-  });
-
-  const finalMessage = (await readIfExists(sandbox, outputPath)).trim();
-  const changedFiles = await listChangedFiles(sandbox);
-  const toolCalls = parseCodexToolCalls(result?.stdout || "");
-
-  if (result.exitCode === 0) {
-    await sandbox.files.write(MODEL_FILE, chosenModel);
-    await sandbox.commands.run(`touch ${READY_MARKER}`, { requestTimeoutMs: 5_000 });
-
-    const hasMetadata = changedFiles.length > 0 || toolCalls.length > 0;
+    // Build final assistant message
+    const changedFiles = await listChangedFiles(sandbox);
+    const hasMetadata = changedFiles.length > 0 || allToolCalls.length > 0;
     const metadata = hasMetadata
-      ? JSON.parse(JSON.stringify({
+      ? {
           ...(changedFiles.length > 0 ? { filesChanged: changedFiles } : {}),
-          ...(toolCalls.length > 0 ? { toolCalls } : {}),
-        }))
+          ...(allToolCalls.length > 0 ? { toolCalls: allToolCalls } : {}),
+        }
       : undefined;
 
     await prisma.chatMessage.create({
       data: {
         sessionId,
         role: "ASSISTANT",
-        content: finalMessage || "Done.",
-        rawContent: result.stdout || null,
-        metadata,
+        content: finalText || "Done.",
+        metadata: metadata ? JSON.parse(JSON.stringify(metadata)) : undefined,
       },
     });
-    return;
+  } catch (error) {
+    // Clean up working message on error
+    await prisma.chatMessage.delete({ where: { id: workingMsg.id } }).catch(() => {});
+    throw error;
   }
-
-  const failureDetails = [result.stderr, result.stdout].find(Boolean)?.trim() || "Codex exited without a response.";
-
-  if (failureDetails.includes("responses_websocket")) {
-    const diagnosis = await diagnoseOpenAIFailure();
-    if (diagnosis) {
-      throw new Error(`${diagnosis} Original Codex error: ${failureDetails}`.slice(0, 1000));
-    }
-  }
-
-  throw new Error(failureDetails.slice(0, 1000));
 }
 
-/**
- * Try to recover a Codex run started by a crashed pod.
- * Checks if the output file exists (meaning Codex finished).
- * Returns true if recovered, false if still running.
- */
-export async function recoverAgentRun(
-  sessionId: string,
-  sandboxId: string,
-  runId: string,
-  workingMsgId: string | null
-): Promise<boolean> {
-  const sandbox = await Sandbox.connect(sandboxId);
-  const outputPath = `${CODEX_STATE_DIR}/last-message-${runId}.txt`;
-  const logPath = `${CODEX_STATE_DIR}/codex-log-${runId}.jsonl`;
-
-  // Check if Codex finished by looking for the output file
-  const finalMessage = (await readIfExists(sandbox, outputPath)).trim();
-  if (!finalMessage) return false; // Still running
-
-  console.log(`[Agent] Recovering finished run ${runId} for session ${sessionId}`);
-
-  // Codex finished — save the result
-  const changedFiles = await listChangedFiles(sandbox);
-  const logContent = await readIfExists(sandbox, logPath);
-  const toolCalls = parseCodexToolCalls(logContent);
-
-  const hasMetadata = changedFiles.length > 0 || toolCalls.length > 0;
-  const metadata = hasMetadata
-    ? JSON.parse(JSON.stringify({
-        ...(changedFiles.length > 0 ? { filesChanged: changedFiles } : {}),
-        ...(toolCalls.length > 0 ? { toolCalls } : {}),
-      }))
-    : undefined;
-
-  // Delete the stale "working" message
-  if (workingMsgId) {
-    await prisma.chatMessage.delete({ where: { id: workingMsgId } }).catch(() => {});
+/** Strip large values (like file content) from args for display */
+function sanitizeArgs(args: Record<string, string>): Record<string, string> {
+  const sanitized: Record<string, string> = {};
+  for (const [k, v] of Object.entries(args)) {
+    if (k === "content" && v.length > 200) {
+      sanitized[k] = v.slice(0, 200) + "...";
+    } else {
+      sanitized[k] = v;
+    }
   }
-
-  await prisma.chatMessage.create({
-    data: {
-      sessionId,
-      role: "ASSISTANT",
-      content: finalMessage,
-      rawContent: logContent || null,
-      metadata,
-    },
-  });
-
-  // Mark ready for next turn
-  await sandbox.files.write(MODEL_FILE, PREFERRED_MODEL);
-  await sandbox.commands.run(`touch ${READY_MARKER}`, { requestTimeoutMs: 5_000 });
-
-  return true;
+  return sanitized;
 }
