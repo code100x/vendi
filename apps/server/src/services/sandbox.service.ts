@@ -44,7 +44,7 @@ export async function startSessionSandbox(
       ...(env.OPENAI_API_KEY ? { OPENAI_API_KEY: env.OPENAI_API_KEY } : {}),
       ...(env.OPENROUTER_API_KEY ? { OPENROUTER_API_KEY: env.OPENROUTER_API_KEY } : {}),
     },
-  });
+  } as any);
 
   const branchName = `vendi/session-${sessionId}`;
 

@@ -10,13 +10,12 @@ import { randomUUID } from "node:crypto";
 
 const CONFIG_PATH = "/workspace/.vendi/agent-config.json";
 const LOG_PATH = "/workspace/.vendi/agent-log.jsonl";
-const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 const MAX_COMMAND_TIMEOUT_MS = 60_000;
 
 // ── Load config ──────────────────────────────────────────────────────────────
 
 const config = JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8"));
-const { openrouterApiKey, model, systemPrompt, messages, maxIterations } = config;
+const { llmBaseUrl, llmApiKey, llmModel, systemPrompt, messages, maxIterations } = config;
 
 // Clear log file for this run
 fs.writeFileSync(LOG_PATH, "");
@@ -102,17 +101,17 @@ async function callLLM(msgs) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 120_000);
   try {
-    const res = await fetch(OPENROUTER_URL, {
+    const res = await fetch(llmBaseUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: \`Bearer \${openrouterApiKey}\`,
+        Authorization: \`Bearer \${llmApiKey}\`,
         "X-Title": "Vendi",
       },
-      body: JSON.stringify({ model, messages: msgs, tools, max_tokens: 4096 }),
+      body: JSON.stringify({ model: llmModel, messages: msgs, tools, max_tokens: 4096 }),
       signal: controller.signal,
     });
-    if (!res.ok) throw new Error(\`OpenRouter error \${res.status}: \${await res.text()}\`);
+    if (!res.ok) throw new Error(\`LLM error \${res.status}: \${await res.text()}\`);
     return res.json();
   } finally {
     clearTimeout(timeout);

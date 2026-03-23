@@ -21,6 +21,7 @@ const envSchema = z.object({
   E2B_API_KEY: z.string().optional(),
 
   // LLM
+  LLM_PROVIDER: z.enum(["openai", "openrouter"]).default("openai"),
   OPENROUTER_API_KEY: z.string().optional(),
   OPENAI_API_KEY: z.string().optional(),
 });

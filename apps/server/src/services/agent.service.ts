@@ -38,11 +38,27 @@ async function buildConversationHistory(sessionId: string): Promise<any[]> {
   return history;
 }
 
+function getLLMConfig() {
+  if (env.LLM_PROVIDER === "openai") {
+    if (!env.OPENAI_API_KEY) throw new Error("OPENAI_API_KEY not set");
+    return {
+      llmBaseUrl: "https://api.openai.com/v1/chat/completions",
+      llmApiKey: env.OPENAI_API_KEY,
+      llmModel: "gpt-4.1",
+    };
+  }
+  if (!env.OPENROUTER_API_KEY) throw new Error("OPENROUTER_API_KEY not set");
+  return {
+    llmBaseUrl: "https://openrouter.ai/api/v1/chat/completions",
+    llmApiKey: env.OPENROUTER_API_KEY,
+    llmModel: "anthropic/claude-sonnet-4",
+  };
+}
+
 export async function startAgentTurn(config: StartAgentConfig): Promise<void> {
   const { sessionId, sandboxId, userMessage, systemPrompt } = config;
 
-  if (!env.OPENROUTER_API_KEY) throw new Error("OPENROUTER_API_KEY not set");
-
+  const llmConfig = getLLMConfig();
   const sandbox = await Sandbox.connect(sandboxId);
 
   // Ensure state directory exists
@@ -54,8 +70,7 @@ export async function startAgentTurn(config: StartAgentConfig): Promise<void> {
 
   // Write config for the agent script
   const agentConfig = {
-    openrouterApiKey: env.OPENROUTER_API_KEY,
-    model: "anthropic/claude-sonnet-4",
+    ...llmConfig,
     systemPrompt,
     messages: history,
     maxIterations: 50,

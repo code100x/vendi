@@ -4,8 +4,14 @@ import { decrypt, encrypt } from "../lib/crypto";
 import { env } from "../config/env";
 import { buildProjectTemplate } from "./template.service";
 
-const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
-const MODEL = "anthropic/claude-sonnet-4";
+function getLLMConfig() {
+  if (env.LLM_PROVIDER === "openai") {
+    if (!env.OPENAI_API_KEY) throw new Error("OPENAI_API_KEY not set");
+    return { url: "https://api.openai.com/v1/chat/completions", key: env.OPENAI_API_KEY, model: "gpt-4.1" };
+  }
+  if (!env.OPENROUTER_API_KEY) throw new Error("OPENROUTER_API_KEY not set");
+  return { url: "https://openrouter.ai/api/v1/chat/completions", key: env.OPENROUTER_API_KEY, model: "anthropic/claude-sonnet-4" };
+}
 
 interface ChatMsg {
   id: string;
@@ -142,16 +148,17 @@ async function executeTool(sandbox: Sandbox, name: string, args: Record<string, 
 }
 
 async function callLLM(messages: any[]): Promise<any> {
-  const res = await fetch(OPENROUTER_URL, {
+  const { url, key, model } = getLLMConfig();
+  const res = await fetch(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${env.OPENROUTER_API_KEY}`,
+      Authorization: `Bearer ${key}`,
       "X-Title": "Vendi",
     },
-    body: JSON.stringify({ model: MODEL, messages, tools, max_tokens: 4096 }),
+    body: JSON.stringify({ model, messages, tools, max_tokens: 4096 }),
   });
-  if (!res.ok) throw new Error(`OpenRouter error ${res.status}: ${await res.text()}`);
+  if (!res.ok) throw new Error(`LLM error ${res.status}: ${await res.text()}`);
   return res.json();
 }
 
@@ -310,7 +317,7 @@ export async function startSetupSession(projectId: string, userId: string): Prom
   (async () => {
     try {
       await persistState(projectId, { status: "Creating sandbox..." });
-      const sandbox = await Sandbox.create({ timeoutMs: 30 * 60_000, cpuCount: 8, memoryMB: 8192 });
+      const sandbox = await Sandbox.create({ timeoutMs: 30 * 60_000, cpuCount: 8, memoryMB: 8192 } as any);
       sandboxCache.set(projectId, sandbox);
       scheduleSandboxCleanup(projectId);
       await persistState(projectId, { sandboxId: sandbox.sandboxId });
