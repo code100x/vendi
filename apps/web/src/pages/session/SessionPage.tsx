@@ -17,6 +17,8 @@ import {
   Loader2,
   StopCircle,
   FileCode2,
+  CheckCircle2,
+  ArrowLeftCircle,
 } from "lucide-react";
 
 // ── Status badge ────────────────────────────────────────────────────────────
@@ -130,6 +132,7 @@ export function SessionPage() {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [vncKey, setVncKey] = useState(0);
   const [input, setInput] = useState("");
+  const [showActions, setShowActions] = useState(false);
 
   const {
     messages,
@@ -332,9 +335,10 @@ export function SessionPage() {
           <div ref={messagesEndRef} />
         </div>
 
-        {/* Input */}
+        {/* Input / Actions */}
         <div className="border-t border-gray-200 bg-white p-3">
-          {isSessionActive && (
+          {/* Chat input — visible when session active and not in "done" mode */}
+          {isSessionActive && !showActions && (
             <div className="flex items-end gap-2">
               <textarea
                 ref={textareaRef}
@@ -365,89 +369,117 @@ export function SessionPage() {
                   <StopCircle className="h-4 w-4" />
                 </button>
               ) : (
-                <button
-                  onClick={handleSend}
-                  disabled={!input.trim()}
-                  className={cn(
-                    "flex h-10 w-10 shrink-0 items-center justify-center rounded-xl transition-colors",
-                    input.trim()
-                      ? "bg-gray-900 text-white hover:bg-gray-800"
-                      : "bg-gray-100 text-gray-400 cursor-not-allowed"
-                  )}
-                >
-                  <Send className="h-4 w-4" />
-                </button>
+                <>
+                  <button
+                    onClick={handleSend}
+                    disabled={!input.trim()}
+                    className={cn(
+                      "flex h-10 w-10 shrink-0 items-center justify-center rounded-xl transition-colors",
+                      input.trim()
+                        ? "bg-gray-900 text-white hover:bg-gray-800"
+                        : "bg-gray-100 text-gray-400 cursor-not-allowed"
+                    )}
+                  >
+                    <Send className="h-4 w-4" />
+                  </button>
+                  <button
+                    onClick={() => setShowActions(true)}
+                    className="flex h-10 shrink-0 items-center gap-2 rounded-xl bg-green-600 text-white px-4 hover:bg-green-700 transition-colors text-sm font-medium"
+                    title="Finish editing and choose what to do with changes"
+                  >
+                    <CheckCircle2 className="h-4 w-4" />
+                    Done
+                  </button>
+                </>
               )}
             </div>
           )}
 
-          {/* Action bar after session ends */}
-          {isSessionEnded && !session?.outcome && (
-            <div className="flex items-center gap-2 flex-wrap">
-              <button
-                onClick={() => createPr.mutate()}
-                disabled={anyActionLoading}
-                className={cn(
-                  "inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-colors",
-                  "bg-gray-900 text-white hover:bg-gray-800",
-                  "disabled:opacity-50 disabled:cursor-not-allowed"
-                )}
-              >
-                {createPr.isPending ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                ) : (
-                  <GitPullRequest className="h-4 w-4" />
-                )}
-                Create PR
-              </button>
-              <button
-                onClick={() => {
-                  if (
-                    window.confirm(
-                      "Are you sure you want to commit directly to main?"
-                    )
-                  ) {
-                    commitToMain.mutate();
-                  }
-                }}
-                disabled={anyActionLoading}
-                className={cn(
-                  "inline-flex items-center gap-2 rounded-lg border border-gray-200 px-4 py-2 text-sm font-medium transition-colors",
-                  "bg-white text-gray-700 hover:bg-gray-50",
-                  "disabled:opacity-50 disabled:cursor-not-allowed"
-                )}
-              >
-                {commitToMain.isPending ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                ) : (
-                  <GitMerge className="h-4 w-4" />
-                )}
-                Commit to Main
-              </button>
-              <button
-                onClick={() => {
-                  if (
-                    window.confirm(
-                      "Are you sure you want to discard all changes?"
-                    )
-                  ) {
-                    discard.mutate();
-                  }
-                }}
-                disabled={anyActionLoading}
-                className={cn(
-                  "inline-flex items-center gap-2 rounded-lg border border-red-200 px-4 py-2 text-sm font-medium transition-colors",
-                  "bg-white text-red-600 hover:bg-red-50",
-                  "disabled:opacity-50 disabled:cursor-not-allowed"
-                )}
-              >
-                {discard.isPending ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                ) : (
-                  <Trash2 className="h-4 w-4" />
-                )}
-                Discard
-              </button>
+          {/* Action buttons — visible after clicking "Done" or when session ended naturally */}
+          {((isSessionActive && showActions) || isSessionEnded) && !session?.outcome && (
+            <div className="space-y-3">
+              <div className="text-sm font-medium text-gray-700 text-center">
+                What would you like to do with your changes?
+              </div>
+              <div className="flex items-center justify-center gap-2 flex-wrap">
+                <button
+                  onClick={() => createPr.mutate()}
+                  disabled={anyActionLoading}
+                  className={cn(
+                    "inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-colors",
+                    "bg-gray-900 text-white hover:bg-gray-800",
+                    "disabled:opacity-50 disabled:cursor-not-allowed"
+                  )}
+                >
+                  {createPr.isPending ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <GitPullRequest className="h-4 w-4" />
+                  )}
+                  Create PR
+                </button>
+                <button
+                  onClick={() => {
+                    if (
+                      window.confirm(
+                        "Are you sure you want to commit directly to main?"
+                      )
+                    ) {
+                      commitToMain.mutate();
+                    }
+                  }}
+                  disabled={anyActionLoading}
+                  className={cn(
+                    "inline-flex items-center gap-2 rounded-lg border border-gray-200 px-4 py-2 text-sm font-medium transition-colors",
+                    "bg-white text-gray-700 hover:bg-gray-50",
+                    "disabled:opacity-50 disabled:cursor-not-allowed"
+                  )}
+                >
+                  {commitToMain.isPending ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <GitMerge className="h-4 w-4" />
+                  )}
+                  Commit to Main
+                </button>
+                <button
+                  onClick={() => {
+                    if (
+                      window.confirm(
+                        "Are you sure you want to discard all changes?"
+                      )
+                    ) {
+                      discard.mutate();
+                    }
+                  }}
+                  disabled={anyActionLoading}
+                  className={cn(
+                    "inline-flex items-center gap-2 rounded-lg border border-red-200 px-4 py-2 text-sm font-medium transition-colors",
+                    "bg-white text-red-600 hover:bg-red-50",
+                    "disabled:opacity-50 disabled:cursor-not-allowed"
+                  )}
+                >
+                  {discard.isPending ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <Trash2 className="h-4 w-4" />
+                  )}
+                  Discard
+                </button>
+              </div>
+              {/* Back to chat — only if session is still running */}
+              {isSessionActive && (
+                <div className="flex justify-center">
+                  <button
+                    onClick={() => setShowActions(false)}
+                    disabled={anyActionLoading}
+                    className="inline-flex items-center gap-1.5 text-xs text-gray-400 hover:text-gray-600 transition-colors disabled:opacity-50"
+                  >
+                    <ArrowLeftCircle className="h-3.5 w-3.5" />
+                    Back to chat
+                  </button>
+                </div>
+              )}
             </div>
           )}
 

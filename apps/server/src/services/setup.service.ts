@@ -24,6 +24,19 @@ interface ToolCallEntry {
 
 // In-memory: only sandbox references (can't be serialized)
 const activeSandboxes = new Map<string, Sandbox>();
+const sandboxTimeouts = new Map<string, NodeJS.Timeout>();
+
+const SANDBOX_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes
+
+function scheduleSandboxCleanup(projectId: string) {
+  const existing = sandboxTimeouts.get(projectId);
+  if (existing) clearTimeout(existing);
+  const timeout = setTimeout(() => {
+    console.log(`[Setup] Sandbox idle timeout for project ${projectId}`);
+    cleanupSandbox(projectId);
+  }, SANDBOX_TIMEOUT_MS);
+  sandboxTimeouts.set(projectId, timeout);
+}
 
 const SETUP_SYSTEM_PROMPT = `You are a project setup assistant for Vendi. Your job is to analyze a project's codebase and automatically configure it for running in a sandbox environment.
 
@@ -68,6 +81,8 @@ RULES:
 - Parse the .env content the developer pastes and include ALL variables in envVars
 - Keep messages short — one message to summarize findings, one to ask for .env values
 - Do NOT output [SETUP_COMPLETE] until you have the env vars from the user
+- Keep the [SETUP_COMPLETE] JSON compact — no extra whitespace or commentary inside the block
+- Do NOT echo back or summarize all the env vars before the [SETUP_COMPLETE] block — go straight to the JSON output
 `;
 
 const tools = [
@@ -113,7 +128,7 @@ async function callLLM(messages: any[]): Promise<any> {
       Authorization: `Bearer ${env.OPENROUTER_API_KEY}`,
       "X-Title": "Vendi",
     },
-    body: JSON.stringify({ model: MODEL, messages, tools, max_tokens: 1024 }),
+    body: JSON.stringify({ model: MODEL, messages, tools, max_tokens: 4096 }),
   });
   if (!res.ok) throw new Error(`OpenRouter error ${res.status}: ${await res.text()}`);
   return res.json();
@@ -211,8 +226,17 @@ async function runAgentLoop(ctx: LoopContext): Promise<string> {
       continue;
     }
 
-    // Got a text response
-    return msg.content || "";
+    // Got a text response — check if it was truncated mid-[SETUP_COMPLETE]
+    const text = msg.content || "";
+    if (text.includes("[SETUP_COMPLETE]") && !text.includes("[/SETUP_COMPLETE]")) {
+      console.log("[Setup] Detected truncated SETUP_COMPLETE block, asking LLM to continue");
+      ctx.llmMessages.push({
+        role: "user",
+        content: "Your response was cut off. Please output the complete [SETUP_COMPLETE]...[/SETUP_COMPLETE] block again with all environment variables included. Output ONLY the JSON block, nothing else.",
+      });
+      continue;
+    }
+    return text;
   }
 
   // Exhausted iterations — force a summary
@@ -263,8 +287,9 @@ export async function startSetupSession(projectId: string, userId: string): Prom
   (async () => {
     try {
       await persistState(projectId, { status: "Creating sandbox..." });
-      const sandbox = await Sandbox.create({ timeoutMs: 600_000 });
+      const sandbox = await Sandbox.create({ timeoutMs: 30 * 60_000 });
       activeSandboxes.set(projectId, sandbox);
+      scheduleSandboxCleanup(projectId);
 
       await persistState(projectId, { status: "Cloning repository..." });
       await sandbox.commands.run(
@@ -343,6 +368,7 @@ export async function sendSetupMessage(projectId: string, content: string): Prom
 
   const sandbox = activeSandboxes.get(projectId);
   if (!sandbox) throw new Error("No active sandbox. Please refresh to restart setup.");
+  scheduleSandboxCleanup(projectId);
 
   const chatMessages = state.messages;
   const toolCalls: ToolCallEntry[] = [];
@@ -467,6 +493,11 @@ async function applySetupConfig(projectId: string, config: any) {
 }
 
 async function cleanupSandbox(projectId: string) {
+  const timeout = sandboxTimeouts.get(projectId);
+  if (timeout) {
+    clearTimeout(timeout);
+    sandboxTimeouts.delete(projectId);
+  }
   const sandbox = activeSandboxes.get(projectId);
   if (sandbox) {
     await sandbox.kill().catch(() => {});
