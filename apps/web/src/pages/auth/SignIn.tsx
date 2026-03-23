@@ -1,3 +1,5 @@
+const apiBase = import.meta.env.VITE_API_URL || "";
+
 export function SignIn() {
   return (
     <div className="flex min-h-screen items-center justify-center bg-gray-50">
@@ -8,13 +10,13 @@ export function SignIn() {
         </div>
         <div className="space-y-3">
           <a
-            href="/api/v1/auth/google"
+            href={`${apiBase}/api/v1/auth/google`}
             className="flex w-full items-center justify-center gap-2 rounded-lg border bg-white px-4 py-3 text-sm font-medium hover:bg-gray-50 transition-colors"
           >
             Continue with Google
           </a>
           <a
-            href="/api/v1/auth/github"
+            href={`${apiBase}/api/v1/auth/github`}
             className="flex w-full items-center justify-center gap-2 rounded-lg border bg-white px-4 py-3 text-sm font-medium hover:bg-gray-50 transition-colors"
           >
             Continue with GitHub
