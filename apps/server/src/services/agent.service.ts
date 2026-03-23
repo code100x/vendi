@@ -329,50 +329,35 @@ export async function runAgentTurn(config: AgentRunConfig): Promise<void> {
     const model = models[index]!;
     const shouldResume = index === 0 ? resume : false;
 
-    // Poll sandbox for live activity while Codex runs
+    // Lightweight poll: single command every 10s to show activity without overloading sandbox
     const logPath = `${CODEX_STATE_DIR}/codex-log-${runId}.jsonl`;
     let lastStatus = "";
     const pollInterval = setInterval(async () => {
       try {
-        // Check what files Codex has modified
-        const gitResult = await sandbox.commands.run(
-          "cd /workspace && git diff --name-only HEAD 2>/dev/null | head -20",
-          { requestTimeoutMs: 5_000 }
+        const r = await sandbox.commands.run(
+          "cd /workspace && echo FILES=$(git diff --name-only HEAD 2>/dev/null | wc -l) && echo PROCS=$(ps -eo comm 2>/dev/null | grep -cE '(node|yarn|npm|bun|vite|next|turbo)' || echo 0)",
+          { requestTimeoutMs: 8_000 }
         );
-        const changedFiles = (gitResult.stdout || "").trim().split("\n").filter(Boolean);
+        const output = r.stdout || "";
+        const fileCount = parseInt(output.match(/FILES=(\d+)/)?.[1] || "0", 10);
+        const procCount = parseInt(output.match(/PROCS=(\d+)/)?.[1] || "0", 10);
 
-        // Check for running processes (dev servers, installs)
-        const psResult = await sandbox.commands.run(
-          "ps aux 2>/dev/null | grep -E '(node|yarn|npm|bun|turbo|vite|next|tsc)' | grep -v grep | head -5",
-          { requestTimeoutMs: 5_000 }
-        );
-        const processes = (psResult.stdout || "").trim().split("\n").filter(Boolean);
+        let status = "Codex is working on it...";
+        if (procCount > 0 && fileCount === 0) status = "Installing dependencies...";
+        else if (procCount > 0 && fileCount > 0) status = `Dev server running (${fileCount} files changed)...`;
+        else if (fileCount > 0) status = `Modifying files (${fileCount} changed)...`;
 
-        // Build status string
-        let status = "";
-        if (processes.some((p) => p.includes("yarn") || p.includes("npm") || p.includes("bun")))
-          status = "Installing dependencies...";
-        else if (processes.some((p) => p.includes("vite") || p.includes("next") || p.includes("turbo")))
-          status = "Dev server starting...";
-        else if (processes.some((p) => p.includes("tsc")))
-          status = "Compiling TypeScript...";
-        else if (changedFiles.length > 0)
-          status = `Modifying files (${changedFiles.length} changed)...`;
-
-        if (status && status !== lastStatus) {
+        if (status !== lastStatus) {
           lastStatus = status;
           await prisma.chatMessage.update({
             where: { id: workingMsg.id },
-            data: {
-              content: status,
-              metadata: changedFiles.length > 0 ? { filesChanged: changedFiles } : undefined,
-            },
+            data: { content: status },
           });
         }
       } catch {
-        // Ignore polling errors
+        // Ignore — sandbox might be busy
       }
-    }, 3000);
+    }, 10_000);
 
     const attempt = await runCodexCommand(sandbox, model, promptPath, outputPath, logPath, shouldResume);
     clearInterval(pollInterval);
