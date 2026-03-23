@@ -233,6 +233,16 @@ async function runAgentLoop(ctx: LoopContext): Promise<string> {
     iterations++;
     console.log(`[Setup] LLM iteration ${iterations}`);
 
+    // Check if this setup was cancelled (user clicked reconfigure again)
+    const current = await prisma.project.findUnique({
+      where: { id: ctx.projectId },
+      select: { setupSandboxId: true },
+    });
+    if (current?.setupSandboxId !== ctx.sandbox.sandboxId) {
+      console.log(`[Setup] Cancelled — sandbox ${ctx.sandbox.sandboxId} is no longer active for project ${ctx.projectId}`);
+      throw new Error("Setup cancelled");
+    }
+
     const data = await callLLM(ctx.llmMessages);
     const msg = data.choices?.[0]?.message;
     if (!msg) throw new Error("No LLM response");
