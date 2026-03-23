@@ -125,7 +125,12 @@ function ChatBubble({ message }: { message: ChatMessage }) {
   const toolCalls = message.metadata?.toolCalls;
 
   if (message.role === "SYSTEM") {
-    const isWorking = message.content.includes("working on it") || message.content.includes("Setting up your project");
+    const isWorking = message.content.includes("working on it") ||
+      message.content.includes("Setting up") ||
+      message.content.includes("Installing") ||
+      message.content.includes("Modifying files") ||
+      message.content.includes("Dev server") ||
+      message.content.includes("Compiling");
     const systemToolCalls = toolCalls;
     const hasToolCalls = systemToolCalls && systemToolCalls.length > 0;
 
@@ -147,7 +152,7 @@ function ChatBubble({ message }: { message: ChatMessage }) {
                 <span className="h-2 w-2 rounded-full bg-gray-400 animate-bounce [animation-delay:300ms]" />
               </div>
               <span className="text-xs text-gray-400 ml-1">
-                {message.content.includes("Setting up") ? "Setting up project..." : "Codex is working..."}
+                {message.content}
               </span>
               {hasToolCalls && (
                 <>
@@ -156,6 +161,12 @@ function ChatBubble({ message }: { message: ChatMessage }) {
                   </span>
                   <ChevronDown className={cn("h-3 w-3 text-gray-300 transition-transform", toolsExpanded && "rotate-180")} />
                 </>
+              )}
+              {!hasToolCalls && filesChanged && filesChanged.length > 0 && (
+                <span className="text-xs text-gray-300 ml-auto flex items-center gap-1">
+                  <FileCode2 className="h-3 w-3" />
+                  {filesChanged.length} {filesChanged.length === 1 ? "file" : "files"}
+                </span>
               )}
             </button>
             {toolsExpanded && hasToolCalls && (

@@ -273,13 +273,11 @@ async function runCodexCommand(
     "-",
   ];
 
-  // Redirect stdout to log file so we can poll it for live progress.
-  // Direct redirect avoids pipe buffering issues entirely.
   const command =
     `cd /workspace && ` +
     `OPENAI_API_KEY=${shellEscape(env.OPENAI_API_KEY || "")} ` +
     `HOME=${shellEscape(CODEX_HOME_DIR)} ` +
-    `${baseArgs.map(shellEscape).join(" ")} < ${shellEscape(promptPath)} > ${shellEscape(logPath)} 2>&1`;
+    `${baseArgs.map(shellEscape).join(" ")} < ${shellEscape(promptPath)}`;
   try {
     const result = await sandbox.commands.run(command, {
       requestTimeoutMs: 20 * 60 * 1000,
@@ -331,27 +329,50 @@ export async function runAgentTurn(config: AgentRunConfig): Promise<void> {
     const model = models[index]!;
     const shouldResume = index === 0 ? resume : false;
 
-    // Start polling for live tool calls while Codex runs
+    // Poll sandbox for live activity while Codex runs
     const logPath = `${CODEX_STATE_DIR}/codex-log-${runId}.jsonl`;
-    let lastLogSize = 0;
+    let lastStatus = "";
     const pollInterval = setInterval(async () => {
       try {
-        const logContent = await readIfExists(sandbox, logPath);
-        if (logContent.length <= lastLogSize) return;
-        lastLogSize = logContent.length;
-        const liveCalls = parseCodexToolCalls(logContent);
-        if (liveCalls.length > 0) {
+        // Check what files Codex has modified
+        const gitResult = await sandbox.commands.run(
+          "cd /workspace && git diff --name-only HEAD 2>/dev/null | head -20",
+          { requestTimeoutMs: 5_000 }
+        );
+        const changedFiles = (gitResult.stdout || "").trim().split("\n").filter(Boolean);
+
+        // Check for running processes (dev servers, installs)
+        const psResult = await sandbox.commands.run(
+          "ps aux 2>/dev/null | grep -E '(node|yarn|npm|bun|turbo|vite|next|tsc)' | grep -v grep | head -5",
+          { requestTimeoutMs: 5_000 }
+        );
+        const processes = (psResult.stdout || "").trim().split("\n").filter(Boolean);
+
+        // Build status string
+        let status = "";
+        if (processes.some((p) => p.includes("yarn") || p.includes("npm") || p.includes("bun")))
+          status = "Installing dependencies...";
+        else if (processes.some((p) => p.includes("vite") || p.includes("next") || p.includes("turbo")))
+          status = "Dev server starting...";
+        else if (processes.some((p) => p.includes("tsc")))
+          status = "Compiling TypeScript...";
+        else if (changedFiles.length > 0)
+          status = `Modifying files (${changedFiles.length} changed)...`;
+
+        if (status && status !== lastStatus) {
+          lastStatus = status;
           await prisma.chatMessage.update({
             where: { id: workingMsg.id },
             data: {
-              metadata: { toolCalls: liveCalls },
+              content: status,
+              metadata: changedFiles.length > 0 ? { filesChanged: changedFiles } : undefined,
             },
           });
         }
       } catch {
         // Ignore polling errors
       }
-    }, 2000);
+    }, 3000);
 
     const attempt = await runCodexCommand(sandbox, model, promptPath, outputPath, logPath, shouldResume);
     clearInterval(pollInterval);
@@ -394,9 +415,7 @@ export async function runAgentTurn(config: AgentRunConfig): Promise<void> {
 
   const finalMessage = (await readIfExists(sandbox, outputPath)).trim();
   const changedFiles = await listChangedFiles(sandbox);
-  // Read from log file (stdout was redirected there)
-  const logContent = await readIfExists(sandbox, result.logPath);
-  const toolCalls = parseCodexToolCalls(logContent);
+  const toolCalls = parseCodexToolCalls(result?.stdout || "");
 
   if (result.exitCode === 0) {
     await sandbox.files.write(MODEL_FILE, chosenModel);
@@ -415,14 +434,14 @@ export async function runAgentTurn(config: AgentRunConfig): Promise<void> {
         sessionId,
         role: "ASSISTANT",
         content: finalMessage || "Done.",
-        rawContent: logContent || null,
+        rawContent: result.stdout || null,
         metadata,
       },
     });
     return;
   }
 
-  const failureDetails = [logContent, result.stderr, result.stdout].find(Boolean)?.trim() || "Codex exited without a response.";
+  const failureDetails = [result.stderr, result.stdout].find(Boolean)?.trim() || "Codex exited without a response.";
 
   if (failureDetails.includes("responses_websocket")) {
     const diagnosis = await diagnoseOpenAIFailure();
