@@ -250,8 +250,10 @@ async function runCodexCommand(
   model: string,
   promptPath: string,
   outputPath: string,
+  logPath: string,
   resume: boolean
-): Promise<CommandResult> {
+): Promise<CommandResult & { logPath: string }> {
+
   const baseArgs = [
     "codex",
     "exec",
@@ -271,18 +273,20 @@ async function runCodexCommand(
     "-",
   ];
 
+  // Pipe stdout to a log file so we can poll it for live progress
   const command =
     `cd /workspace && ` +
     `OPENAI_API_KEY=${shellEscape(env.OPENAI_API_KEY || "")} ` +
     `HOME=${shellEscape(CODEX_HOME_DIR)} ` +
-    `${baseArgs.map(shellEscape).join(" ")} < ${shellEscape(promptPath)}`;
+    `${baseArgs.map(shellEscape).join(" ")} < ${shellEscape(promptPath)} | tee ${shellEscape(logPath)}`;
   try {
-    return await sandbox.commands.run(command, {
+    const result = await sandbox.commands.run(command, {
       requestTimeoutMs: 20 * 60 * 1000,
       timeoutMs: 0,
     });
+    return { ...result, logPath };
   } catch (error: any) {
-    if (error?.result) return error.result as CommandResult;
+    if (error?.result) return { ...error.result as CommandResult, logPath };
     throw error;
   }
 }
@@ -303,7 +307,7 @@ export async function runAgentTurn(config: AgentRunConfig): Promise<void> {
   const prompt = buildPrompt(systemPrompt, userMessage, maxBudgetUsd);
   await sandbox.files.write(promptPath, prompt);
 
-  await prisma.chatMessage.create({
+  const workingMsg = await prisma.chatMessage.create({
     data: {
       sessionId,
       role: "SYSTEM",
@@ -311,7 +315,7 @@ export async function runAgentTurn(config: AgentRunConfig): Promise<void> {
     },
   });
 
-  let result: CommandResult | null = null;
+  let result: (CommandResult & { logPath: string }) | null = null;
   const resume = await hasExistingSession(sandbox);
   const models = await getSessionModels(sandbox);
   let chosenModel = models[0];
@@ -319,7 +323,31 @@ export async function runAgentTurn(config: AgentRunConfig): Promise<void> {
   for (let index = 0; index < models.length; index++) {
     const model = models[index]!;
     const shouldResume = index === 0 ? resume : false;
-    const attempt = await runCodexCommand(sandbox, model, promptPath, outputPath, shouldResume);
+
+    // Start polling for live tool calls while Codex runs
+    const logPath = `${CODEX_STATE_DIR}/codex-log-${runId}.jsonl`;
+    let lastLogSize = 0;
+    const pollInterval = setInterval(async () => {
+      try {
+        const logContent = await readIfExists(sandbox, logPath);
+        if (logContent.length <= lastLogSize) return;
+        lastLogSize = logContent.length;
+        const liveCalls = parseCodexToolCalls(logContent);
+        if (liveCalls.length > 0) {
+          await prisma.chatMessage.update({
+            where: { id: workingMsg.id },
+            data: {
+              metadata: { toolCalls: liveCalls },
+            },
+          });
+        }
+      } catch {
+        // Ignore polling errors
+      }
+    }, 2000);
+
+    const attempt = await runCodexCommand(sandbox, model, promptPath, outputPath, logPath, shouldResume);
+    clearInterval(pollInterval);
 
     if (attempt.exitCode === 0) {
       result = attempt;
@@ -350,9 +378,14 @@ export async function runAgentTurn(config: AgentRunConfig): Promise<void> {
 
   if (!result) throw new Error("Codex did not return a result.");
 
+  // Remove the "working" placeholder — final message replaces it
+  await prisma.chatMessage.delete({ where: { id: workingMsg.id } }).catch(() => {});
+
   const finalMessage = (await readIfExists(sandbox, outputPath)).trim();
   const changedFiles = await listChangedFiles(sandbox);
-  const toolCalls = parseCodexToolCalls(result?.stdout || "");
+  // Read from log file for final parsing (tee pipes stdout to file)
+  const logContent = await readIfExists(sandbox, result.logPath);
+  const toolCalls = parseCodexToolCalls(logContent || result?.stdout || "");
 
   if (result.exitCode === 0) {
     await sandbox.files.write(MODEL_FILE, chosenModel);

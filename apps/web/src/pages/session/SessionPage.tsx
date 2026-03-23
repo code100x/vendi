@@ -125,6 +125,46 @@ function ChatBubble({ message }: { message: ChatMessage }) {
   const toolCalls = message.metadata?.toolCalls;
 
   if (message.role === "SYSTEM") {
+    const isWorking = message.content.includes("working on it");
+    const systemToolCalls = toolCalls;
+
+    // If it's the "working" message with live tool calls, show expanded view
+    if (isWorking && systemToolCalls && systemToolCalls.length > 0) {
+      return (
+        <div className="flex justify-start my-3">
+          <div className="max-w-[80%] bg-white border border-gray-200 rounded-2xl rounded-bl-md shadow-sm overflow-hidden">
+            <button
+              onClick={() => setToolsExpanded((v) => !v)}
+              className="flex items-center gap-2 px-4 py-3 w-full hover:bg-gray-50 transition-colors"
+            >
+              <div className="flex gap-1">
+                <span className="h-2 w-2 rounded-full bg-gray-400 animate-bounce [animation-delay:0ms]" />
+                <span className="h-2 w-2 rounded-full bg-gray-400 animate-bounce [animation-delay:150ms]" />
+                <span className="h-2 w-2 rounded-full bg-gray-400 animate-bounce [animation-delay:300ms]" />
+              </div>
+              <span className="text-xs text-gray-400 ml-1">Codex is working...</span>
+              <span className="text-xs text-gray-300 ml-auto tabular-nums">
+                {systemToolCalls.length} {systemToolCalls.length === 1 ? "call" : "calls"}
+              </span>
+              <ChevronDown className={cn("h-3 w-3 text-gray-300 transition-transform", toolsExpanded && "rotate-180")} />
+            </button>
+            {toolsExpanded && (
+              <div className="border-t border-gray-100 max-h-64 overflow-y-auto">
+                {systemToolCalls.map((tc) => (
+                  <ToolCallRow
+                    key={tc.id}
+                    tc={tc}
+                    isExpanded={expandedToolId === tc.id}
+                    onToggle={() => setExpandedToolId(expandedToolId === tc.id ? null : tc.id)}
+                  />
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    }
+
     return (
       <div className="flex justify-center my-3">
         <div className="max-w-md text-center text-xs text-gray-400 bg-gray-50 rounded-full px-4 py-1.5">
