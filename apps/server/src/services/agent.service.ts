@@ -10,7 +10,7 @@ const CONFIG_PATH = `${VENDI_DIR}/agent-config.json`;
 const SCRIPT_PATH = `${VENDI_DIR}/agent.mjs`;
 const LOG_PATH = `${VENDI_DIR}/agent-log.jsonl`;
 
-const AGENT_STALE_MS = 60 * 60 * 1000; // 1 hour safety valve
+const AGENT_STALE_MS = 10 * 60 * 1000; // 10 minute safety valve
 
 interface StartAgentConfig {
   sessionId: string;
@@ -168,7 +168,7 @@ export async function syncAgentProgress(sessionId: string): Promise<void> {
         data: {
           sessionId,
           role: "SYSTEM",
-          content: "Agent timed out after 1 hour. You can send a new message to try again.",
+          content: "Agent timed out. You can send a new message to try again.",
         },
       });
       await prisma.session.update({
@@ -181,8 +181,9 @@ export async function syncAgentProgress(sessionId: string): Promise<void> {
 
   // Read log file from sandbox
   let logContent = "";
+  let sandbox: Sandbox;
   try {
-    const sandbox = await Sandbox.connect(session.sandboxId);
+    sandbox = await Sandbox.connect(session.sandboxId);
     logContent = String(await sandbox.files.read(LOG_PATH));
   } catch {
     // Sandbox might not be reachable — skip this cycle
@@ -190,11 +191,54 @@ export async function syncAgentProgress(sessionId: string): Promise<void> {
   }
 
   const entries = parseLogFile(logContent);
-  if (entries.length === 0) return;
 
   // Check for done/error entry
   const doneEntry = entries.find((e) => e.type === "done");
   const errorEntry = entries.find((e) => e.type === "error");
+
+  // If no done/error yet, check if the agent process is actually still alive
+  if (!doneEntry && !errorEntry) {
+    try {
+      const psResult = await sandbox.commands.run(
+        "pgrep -f 'node.*agent\\.mjs' > /dev/null 2>&1 && echo ALIVE || echo DEAD",
+        { requestTimeoutMs: 5_000 }
+      );
+      if (psResult.stdout.trim() === "DEAD" && entries.length > 0) {
+        console.log(`[Agent] Agent process died without writing done/error for session ${sessionId}`);
+        // Treat as a crashed agent — synthesize an error entry
+        const toolCalls: ToolCallEntry[] = entries
+          .filter((e) => e.type === "tool_call")
+          .map((e) => ({
+            id: e.id || "",
+            name: e.name || "",
+            args: e.args || {},
+            result: e.result || "",
+            timestamp: e.timestamp || "",
+          }));
+
+        if (session.agentWorkingMsgId) {
+          await prisma.chatMessage.delete({ where: { id: session.agentWorkingMsgId } }).catch(() => {});
+        }
+        await prisma.chatMessage.create({
+          data: {
+            sessionId,
+            role: "SYSTEM",
+            content: "The agent encountered an unexpected error. You can send a new message to try again.",
+            metadata: toolCalls.length > 0 ? JSON.parse(JSON.stringify({ toolCalls })) : undefined,
+          },
+        });
+        await prisma.session.update({
+          where: { id: sessionId },
+          data: { agentRunId: null, agentWorkingMsgId: null, agentRunStartedAt: null },
+        });
+        return;
+      }
+    } catch {
+      // pgrep check failed — ignore, will retry next sweep
+    }
+
+    if (entries.length === 0) return;
+  }
 
   // Extract tool calls for display
   const toolCalls: ToolCallEntry[] = entries
