@@ -10,7 +10,7 @@ import { randomUUID } from "node:crypto";
 
 const CONFIG_PATH = "/workspace/.vendi/agent-config.json";
 const LOG_PATH = "/workspace/.vendi/agent-log.jsonl";
-const MAX_COMMAND_TIMEOUT_MS = 60_000;
+const MAX_COMMAND_TIMEOUT_MS = 300_000;
 
 // Cost tracking — gpt-4.1 pricing ($/1M tokens)
 const COST_PER_1M_INPUT = 2.00;
@@ -57,11 +57,11 @@ function sanitizeArgs(args) {
 // ── Tool definitions ─────────────────────────────────────────────────────────
 
 const tools = [
-  { type: "function", function: { name: "read_file", description: "Read a file", parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } } },
-  { type: "function", function: { name: "write_file", description: "Write or create a file", parameters: { type: "object", properties: { path: { type: "string" }, content: { type: "string" } }, required: ["path", "content"] } } },
-  { type: "function", function: { name: "list_files", description: "List files in a directory (3 levels, max 80)", parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } } },
-  { type: "function", function: { name: "search_code", description: "Search for a regex pattern in source files", parameters: { type: "object", properties: { pattern: { type: "string" } }, required: ["pattern"] } } },
-  { type: "function", function: { name: "run_command", description: "Run a shell command in /workspace (60s timeout)", parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] } } },
+  { type: "function", function: { name: "read_file", description: "Read a file from anywhere on the system", parameters: { type: "object", properties: { path: { type: "string", description: "Absolute path to the file" } }, required: ["path"] } } },
+  { type: "function", function: { name: "write_file", description: "Write or create a file anywhere on the system (directories are created automatically)", parameters: { type: "object", properties: { path: { type: "string", description: "Absolute path to the file" }, content: { type: "string" } }, required: ["path", "content"] } } },
+  { type: "function", function: { name: "list_files", description: "List files in a directory (3 levels deep, max 80 entries)", parameters: { type: "object", properties: { path: { type: "string", description: "Absolute path to the directory" } }, required: ["path"] } } },
+  { type: "function", function: { name: "search_code", description: "Search for a regex pattern across source files in /workspace", parameters: { type: "object", properties: { pattern: { type: "string" } }, required: ["pattern"] } } },
+  { type: "function", function: { name: "run_command", description: "Run any shell command with full system access. You have sudo privileges — use them to start/stop services (postgres, redis, etc.), install packages, modify system config, and anything else needed. 5 minute timeout.", parameters: { type: "object", properties: { command: { type: "string", description: "The shell command to execute. Prefix with sudo for privileged operations." } }, required: ["command"] } } },
 ];
 
 // ── Tool execution ───────────────────────────────────────────────────────────
@@ -95,16 +95,17 @@ function executeTool(name, args) {
       }
       case "run_command": {
         try {
-          const out = execSync(\`cd /workspace && \${args.command}\`, {
+          const out = execSync(args.command, {
             encoding: "utf8",
+            cwd: "/workspace",
             timeout: MAX_COMMAND_TIMEOUT_MS,
-            maxBuffer: 1024 * 1024,
+            maxBuffer: 5 * 1024 * 1024,
           });
-          return (out || "").slice(0, 4000) || "Command completed.";
+          return (out || "").slice(0, 8000) || "Command completed.";
         } catch (e) {
           const stdout = e.stdout || "";
           const stderr = e.stderr || "";
-          return (stdout + "\\n" + stderr).trim().slice(0, 4000) || \`Exit code: \${e.status}\`;
+          return (stdout + "\\n" + stderr).trim().slice(0, 8000) || \`Exit code: \${e.status}\`;
         }
       }
       default:
