@@ -27,7 +27,7 @@ const envSchema = z.object({
   OPENAI_API_KEY: z.string().optional(),
 });
 
-export type Env = z.infer<typeof envSchema>;
+type Env = z.infer<typeof envSchema>;
 
 function validateEnv(): Env {
   const parsed = envSchema.safeParse(process.env);

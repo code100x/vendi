@@ -6,8 +6,3 @@ export interface AuthUser {
   hasApiKey: boolean;
   hasGithubLinked: boolean;
 }
-
-export interface AuthSession {
-  user: AuthUser;
-  expiresAt: string;
-}

@@ -17,10 +17,7 @@ import {
 } from "lucide-react";
 
 export function UserSettings() {
-  const navigate = useNavigate();
-  const queryClient = useQueryClient();
   const { user } = useAuth();
-  const setUser = useAuthStore((s) => s.setUser);
 
   return (
     <div className="max-w-2xl mx-auto">

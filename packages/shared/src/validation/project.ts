@@ -17,5 +17,3 @@ export const updateProjectConfigSchema = z.object({
   maxBudgetUsd: z.number().min(0.1).max(100).optional(),
 });
 
-export type CreateProjectInput = z.infer<typeof createProjectSchema>;
-export type UpdateProjectConfigInput = z.infer<typeof updateProjectConfigSchema>;

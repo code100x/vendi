@@ -3,7 +3,7 @@ import { useParams, Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../lib/api";
 import { cn } from "../../lib/utils";
-import type { Session, Project } from "@vendi/shared";
+import type { Session } from "@vendi/shared";
 import {
   History,
   GitPullRequest,

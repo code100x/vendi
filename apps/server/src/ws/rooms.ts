@@ -34,7 +34,3 @@ export function broadcastToRoom(sessionId: string, message: object): void {
     }
   }
 }
-
-export function getRoomSize(sessionId: string): number {
-  return rooms.get(sessionId)?.size ?? 0;
-}

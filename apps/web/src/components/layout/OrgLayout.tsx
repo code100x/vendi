@@ -1,14 +1,10 @@
-import { Outlet, Navigate, useParams, useOutletContext } from "react-router-dom";
+import { Outlet, Navigate, useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../lib/api";
 import type { Organization } from "@vendi/shared";
 
 interface OrgContext {
   org: Organization;
-}
-
-export function useOrg() {
-  return useOutletContext<OrgContext>();
 }
 
 export function OrgLayout() {

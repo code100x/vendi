@@ -32,31 +32,6 @@ function githubApi(token: string) {
   };
 }
 
-export async function createBranch(
-  userId: string,
-  repoFullName: string,
-  branchName: string,
-  baseBranch: string
-): Promise<void> {
-  const token = await getGithubToken(userId);
-  const api = githubApi(token);
-  const [owner, repo] = repoFullName.split("/");
-
-  // Get SHA of base branch
-  const ref = (await api.fetch(
-    `/repos/${owner}/${repo}/git/ref/heads/${baseBranch}`
-  )) as { object: { sha: string } };
-
-  // Create new branch
-  await api.fetch(`/repos/${owner}/${repo}/git/refs`, {
-    method: "POST",
-    body: JSON.stringify({
-      ref: `refs/heads/${branchName}`,
-      sha: ref.object.sha,
-    }),
-  });
-}
-
 export async function createPullRequest(
   userId: string,
   repoFullName: string,

@@ -1,9 +1,8 @@
 import { useEffect } from "react";
-import { useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 
 export function OAuthCallback() {
   const navigate = useNavigate();
-  const { provider } = useParams();
   const [searchParams] = useSearchParams();
 
   useEffect(() => {

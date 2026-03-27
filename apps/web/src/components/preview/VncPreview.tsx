@@ -6,7 +6,6 @@ import RFB from "@novnc/novnc/core/rfb.js";
 
 interface VncPreviewProps {
   wsUrl: string | null;
-  onRefresh?: () => void;
 }
 
 export function VncPreview({ wsUrl }: VncPreviewProps) {

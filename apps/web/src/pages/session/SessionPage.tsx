@@ -15,7 +15,6 @@ import {
   GitMerge,
   Trash2,
   Loader2,
-  StopCircle,
   FileCode2,
   CheckCircle2,
   ArrowLeftCircle,
@@ -276,25 +275,6 @@ function ChatBubble({ message }: { message: ChatMessage }) {
   );
 }
 
-// ── Typing indicator ────────────────────────────────────────────────────────
-
-function TypingIndicator({ status }: { status: string }) {
-  return (
-    <div className="flex justify-start mb-3">
-      <div className="bg-white border border-gray-200 rounded-2xl rounded-bl-md px-4 py-3 shadow-sm">
-        <div className="flex items-center gap-2">
-          <div className="flex gap-1">
-            <span className="h-2 w-2 rounded-full bg-gray-400 animate-bounce [animation-delay:0ms]" />
-            <span className="h-2 w-2 rounded-full bg-gray-400 animate-bounce [animation-delay:150ms]" />
-            <span className="h-2 w-2 rounded-full bg-gray-400 animate-bounce [animation-delay:300ms]" />
-          </div>
-          <span className="text-xs text-gray-400 ml-1">{status}</span>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 // ── Main component ──────────────────────────────────────────────────────────
 
 export function SessionPage() {
@@ -311,7 +291,6 @@ export function SessionPage() {
     messages,
     status,
     previewUrl,
-    agentStatus,
     totalCostUsd,
     setMessages,
     setStatus,
@@ -402,13 +381,13 @@ export function SessionPage() {
   // Submit message
   const handleSend = useCallback(() => {
     const trimmed = input.trim();
-    if (!trimmed || agentStatus) return;
+    if (!trimmed) return;
     sendMessage(trimmed);
     setInput("");
     if (textareaRef.current) {
       textareaRef.current.style.height = "auto";
     }
-  }, [input, agentStatus, sendMessage]);
+  }, [input, sendMessage]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -494,7 +473,7 @@ export function SessionPage() {
           ref={messagesContainerRef}
           className="flex-1 overflow-y-auto px-4 py-4 space-y-0.5 scroll-smooth bg-gray-50"
         >
-          {messages.length === 0 && !agentStatus && (
+          {messages.length === 0 && (
             <div className="flex h-full items-center justify-center">
               <p className="text-sm text-gray-400">
                 No messages yet. Start the conversation.
@@ -504,7 +483,6 @@ export function SessionPage() {
           {messages.map((msg) => (
             <ChatBubble key={msg.id} message={msg} />
           ))}
-          {agentStatus && <TypingIndicator status={agentStatus} />}
           <div ref={messagesEndRef} />
         </div>
 
@@ -518,12 +496,7 @@ export function SessionPage() {
                 value={input}
                 onChange={handleInputChange}
                 onKeyDown={handleKeyDown}
-                placeholder={
-                  agentStatus
-                    ? "Waiting for agent..."
-                    : "Type a message... (Enter to send, Shift+Enter for newline)"
-                }
-                disabled={!!agentStatus}
+                placeholder="Type a message... (Enter to send, Shift+Enter for newline)"
                 rows={1}
                 className={cn(
                   "flex-1 resize-none rounded-xl border border-gray-200 bg-gray-50 px-4 py-2.5 text-sm",
@@ -533,38 +506,26 @@ export function SessionPage() {
                 )}
                 autoFocus
               />
-              {agentStatus ? (
-                <button
-                  onClick={() => {}}
-                  className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-red-600 text-white hover:bg-red-700 transition-colors"
-                  title="Stop agent"
-                >
-                  <StopCircle className="h-4 w-4" />
-                </button>
-              ) : (
-                <>
-                  <button
-                    onClick={handleSend}
-                    disabled={!input.trim()}
-                    className={cn(
-                      "flex h-10 w-10 shrink-0 items-center justify-center rounded-xl transition-colors",
-                      input.trim()
-                        ? "bg-gray-900 text-white hover:bg-gray-800"
-                        : "bg-gray-100 text-gray-400 cursor-not-allowed"
-                    )}
-                  >
-                    <Send className="h-4 w-4" />
-                  </button>
-                  <button
-                    onClick={() => setShowActions(true)}
-                    className="flex h-10 shrink-0 items-center gap-2 rounded-xl bg-green-600 text-white px-4 hover:bg-green-700 transition-colors text-sm font-medium"
-                    title="Finish editing and choose what to do with changes"
-                  >
-                    <CheckCircle2 className="h-4 w-4" />
-                    Done
-                  </button>
-                </>
-              )}
+              <button
+                onClick={handleSend}
+                disabled={!input.trim()}
+                className={cn(
+                  "flex h-10 w-10 shrink-0 items-center justify-center rounded-xl transition-colors",
+                  input.trim()
+                    ? "bg-gray-900 text-white hover:bg-gray-800"
+                    : "bg-gray-100 text-gray-400 cursor-not-allowed"
+                )}
+              >
+                <Send className="h-4 w-4" />
+              </button>
+              <button
+                onClick={() => setShowActions(true)}
+                className="flex h-10 shrink-0 items-center gap-2 rounded-xl bg-green-600 text-white px-4 hover:bg-green-700 transition-colors text-sm font-medium"
+                title="Finish editing and choose what to do with changes"
+              >
+                <CheckCircle2 className="h-4 w-4" />
+                Done
+              </button>
             </div>
           )}
 

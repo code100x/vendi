@@ -314,7 +314,6 @@ router.post(
   async (req: Request, res: Response) => {
     try {
       const projectId = getProjectId(req);
-      const userId = res.locals.user.id;
       const { content } = req.body;
 
       if (!content || typeof content !== "string") {

@@ -33,8 +33,6 @@ export async function handleWsConnection(ws: WebSocket, req: IncomingMessage) {
     return;
   }
 
-  const userId = user.id;
-
   ws.on("message", async (data: RawData) => {
     try {
       const msg: WsClientMessage = JSON.parse(data.toString());
