@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useParams, Link } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../lib/api";
 import { cn } from "../../lib/utils";
 import type { Session } from "@vendi/shared";
@@ -14,6 +14,8 @@ import {
   ExternalLink,
   Clock,
   DollarSign,
+  Square,
+  Loader2,
 } from "lucide-react";
 
 // ── Types ───────────────────────────────────────────────────────────────────
@@ -208,6 +210,9 @@ function SkeletonRow() {
       <td className="px-4 py-3">
         <div className="h-4 w-12 bg-gray-200 rounded" />
       </td>
+      <td className="px-4 py-3">
+        <div className="h-4 w-8 bg-gray-200 rounded" />
+      </td>
     </tr>
   );
 }
@@ -219,6 +224,8 @@ const PAGE_SIZE = 20;
 export function SessionHistory() {
   const { orgId } = useParams<{ orgId: string }>();
   const [page, setPage] = useState(1);
+  const [confirmId, setConfirmId] = useState<string | null>(null);
+  const queryClient = useQueryClient();
 
   const { data, isLoading } = useQuery({
     queryKey: ["sessions", orgId, page],
@@ -230,6 +237,26 @@ export function SessionHistory() {
       return data;
     },
     enabled: !!orgId,
+  });
+
+  const stopMutation = useMutation({
+    mutationFn: async (sessionId: string) => {
+      await api.post(`/sessions/${sessionId}/discard`);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["sessions", orgId] });
+      setConfirmId(null);
+    },
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: async (sessionId: string) => {
+      await api.delete(`/sessions/${sessionId}`);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["sessions", orgId] });
+      setConfirmId(null);
+    },
   });
 
   const sessions = data?.sessions ?? [];
@@ -271,6 +298,9 @@ export function SessionHistory() {
                 </th>
                 <th className="px-4 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">
                   Cost
+                </th>
+                <th className="px-4 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">
+                  Actions
                 </th>
               </tr>
             </thead>
@@ -327,11 +357,83 @@ export function SessionHistory() {
                         {session.totalCostUsd.toFixed(2)}
                       </span>
                     </td>
+                    <td className="px-4 py-3">
+                      {(() => {
+                        const isActive = session.status === "STARTING" || session.status === "RUNNING";
+                        const isTerminal = ["COMPLETED", "ERRORED", "TIMED_OUT"].includes(session.status);
+                        const isBusy =
+                          (stopMutation.isPending && stopMutation.variables === session.id) ||
+                          (deleteMutation.isPending && deleteMutation.variables === session.id);
+
+                        if (confirmId === session.id) {
+                          return (
+                            <div className="flex items-center gap-1">
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  if (isActive) stopMutation.mutate(session.id);
+                                  else deleteMutation.mutate(session.id);
+                                }}
+                                disabled={isBusy}
+                                className="rounded px-2 py-1 text-xs font-medium text-white bg-red-600 hover:bg-red-700 disabled:opacity-50"
+                              >
+                                {isBusy ? (
+                                  <Loader2 className="h-3 w-3 animate-spin" />
+                                ) : (
+                                  "Confirm"
+                                )}
+                              </button>
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setConfirmId(null);
+                                }}
+                                className="rounded px-2 py-1 text-xs font-medium text-gray-600 hover:bg-gray-100"
+                              >
+                                Cancel
+                              </button>
+                            </div>
+                          );
+                        }
+
+                        if (isActive) {
+                          return (
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setConfirmId(session.id);
+                              }}
+                              title="Stop session"
+                              className="rounded p-1.5 text-gray-400 hover:text-red-600 hover:bg-red-50 transition-colors"
+                            >
+                              <Square className="h-3.5 w-3.5" />
+                            </button>
+                          );
+                        }
+
+                        if (isTerminal) {
+                          return (
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setConfirmId(session.id);
+                              }}
+                              title="Delete session"
+                              className="rounded p-1.5 text-gray-400 hover:text-red-600 hover:bg-red-50 transition-colors"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </button>
+                          );
+                        }
+
+                        return null;
+                      })()}
+                    </td>
                   </tr>
                 ))
               ) : (
                 <tr>
-                  <td colSpan={6} className="px-4 py-16 text-center">
+                  <td colSpan={7} className="px-4 py-16 text-center">
                     <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-gray-100 mb-4">
                       <History className="h-6 w-6 text-gray-400" />
                     </div>

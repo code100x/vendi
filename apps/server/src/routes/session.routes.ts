@@ -375,4 +375,32 @@ router.post("/:sessionId/discard", async (req: Request, res: Response) => {
   }
 });
 
+// DELETE /:sessionId — Delete a completed session record
+router.delete("/:sessionId", async (req: Request, res: Response) => {
+  try {
+    const userId = res.locals.user.id as string;
+    const sessionId = req.params.sessionId as string;
+
+    const result = await getSessionWithAccess(sessionId, userId, res);
+    if (!result) return;
+
+    // Only allow deleting sessions that are finished
+    const terminalStatuses = ["COMPLETED", "ERRORED", "TIMED_OUT"];
+    if (!terminalStatuses.includes(result.session.status)) {
+      return res
+        .status(400)
+        .json({ error: "Can only delete completed, errored, or timed-out sessions. Stop the session first." });
+    }
+
+    // Delete chat messages first (FK constraint), then the session
+    await prisma.chatMessage.deleteMany({ where: { sessionId } });
+    await prisma.session.delete({ where: { id: sessionId } });
+
+    return res.json({ success: true });
+  } catch (error) {
+    console.error("Error deleting session:", error);
+    return res.status(500).json({ error: "Failed to delete session" });
+  }
+});
+
 export default router;
