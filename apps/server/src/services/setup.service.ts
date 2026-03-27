@@ -82,7 +82,7 @@ WHAT TO AUTO-DETECT (do NOT ask the user — figure them out yourself):
 1. Startup commands — from package.json scripts (look for "dev" script), Makefile, README instructions
 2. Migration commands — from prisma (npx prisma migrate deploy / npx prisma db push), drizzle, knex, sequelize, TypeORM, or whatever ORM/migration tool the project uses. If none found, leave empty.
 3. Required services (PostgreSQL, Redis, MySQL, etc.) — from docker-compose.yml, package.json deps, prisma/schema.prisma, etc.
-4. Dev server port — from vite.config.ts, next.config.js, .env.example, or package.json scripts
+4. Dev server port — this MUST be the FRONTEND port (the port that serves the UI in the browser). For full-stack projects with separate frontend/backend, always use the frontend port (e.g. Vite defaults to 5173, Next.js to 3000, React CRA to 3000). Do NOT use the backend/API port. Detect from vite.config.ts, next.config.js, .env.example, or package.json scripts. For monorepos, check the frontend/web/client package specifically.
 5. Allowed file patterns — infer from project structure (e.g. src/**, app/**, pages/**)
 6. Context instructions — a brief description of the project
 

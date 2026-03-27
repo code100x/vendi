@@ -141,7 +141,7 @@ function buildSystemPrompt(project: {
     "The project is cloned at /workspace. Environment variables are in /workspace/.env.",
     "",
     "ENVIRONMENT:",
-    `- Dev server port: ${project.devServerPort}`,
+    `- Frontend dev server port: ${project.devServerPort} (this is the port shown in the virtual browser — ensure the frontend runs here)`,
     `- Required services: ${project.requiredServices.length > 0 ? project.requiredServices.join(", ") : "none"}`,
     `- Startup commands: ${project.startupCommands.length > 0 ? project.startupCommands.join(" && ") : "check package.json"}`,
     `- Migration commands: ${project.migrationCommands.length > 0 ? project.migrationCommands.join(" && ") : "none"}`,
