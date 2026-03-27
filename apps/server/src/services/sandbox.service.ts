@@ -38,7 +38,7 @@ export async function startSessionSandbox(
   const sandbox = await Sandbox.create({
     timeoutMs: project.maxSessionDurationMin * 60 * 1000,
     cpuCount: 8,
-    memoryMB: 8192,
+    memoryMB: 16384,
     envs: {
       GITHUB_TOKEN: githubToken,
       ...(env.OPENAI_API_KEY ? { OPENAI_API_KEY: env.OPENAI_API_KEY } : {}),
@@ -178,10 +178,6 @@ export async function startSessionSandbox(
     await sandbox.kill().catch(() => {});
     throw error;
   }
-}
-
-export async function connectToSandbox(sandboxId: string): Promise<Sandbox> {
-  return Sandbox.connect(sandboxId);
 }
 
 export async function stopSandbox(sandboxId: string): Promise<void> {
