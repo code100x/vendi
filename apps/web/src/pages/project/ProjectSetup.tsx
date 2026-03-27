@@ -99,20 +99,19 @@ export function ProjectSetup() {
           `/orgs/${orgId}/projects/${projectId}/setup/state`
         );
 
-        // Only update state when data actually changes to avoid re-renders / scroll stutter
+        // Replace messages from server (always trust server state)
         setMessages((prev) => {
-          if (data.messages.length === prev.length) return prev;
-          // Keep existing object references stable, append only new ones
-          if (data.messages.length > prev.length) {
-            return [...prev, ...data.messages.slice(prev.length)];
+          if (data.messages.length === prev.length && data.messages.length > 0 &&
+              data.messages[data.messages.length - 1]?.id === prev[prev.length - 1]?.id) {
+            return prev;
           }
           return data.messages;
         });
         setToolCalls((prev) => {
           const incoming = data.toolCalls ?? [];
-          if (incoming.length === prev.length) return prev;
-          if (incoming.length > prev.length) {
-            return [...prev, ...incoming.slice(prev.length)];
+          if (incoming.length === prev.length && incoming.length > 0 &&
+              incoming[incoming.length - 1]?.id === prev[prev.length - 1]?.id) {
+            return prev;
           }
           return incoming;
         });

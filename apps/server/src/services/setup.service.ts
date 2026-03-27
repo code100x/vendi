@@ -329,12 +329,10 @@ export async function startSetupSession(projectId: string, userId: string): Prom
   const [ghEnc, ghIv] = githubAccount.accessToken.split("|");
   const githubToken = decrypt(ghEnc, ghIv);
 
-  // Initialize DB state
-  const initialMessages = existing?.messages ?? [];
-  const initialToolCalls = existing?.toolCalls ?? [];
-  const initialLlmHistory = existing?.llmHistory.length
-    ? existing.llmHistory
-    : [{ role: "system", content: SETUP_SYSTEM_PROMPT }];
+  // Always start fresh — clear any old setup state
+  const initialMessages: ChatMsg[] = [];
+  const initialToolCalls: ToolCallEntry[] = [];
+  const initialLlmHistory = [{ role: "system", content: SETUP_SYSTEM_PROMPT }];
 
   await persistState(projectId, {
     messages: initialMessages,
