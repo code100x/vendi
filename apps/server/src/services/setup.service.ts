@@ -164,23 +164,30 @@ let setupTokensOut = 0;
 
 async function callLLM(messages: any[]): Promise<any> {
   const { url, key, model } = getLLMConfig();
-  const res = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${key}`,
-      "X-Title": "Vendi",
-    },
-    body: JSON.stringify({ model, messages, tools, max_tokens: 4096, parallel_tool_calls: true }),
-  });
-  if (!res.ok) throw new Error(`LLM error ${res.status}: ${await res.text()}`);
-  const json = await res.json();
-  const usage = json?.usage;
-  if (usage) {
-    setupTokensIn += usage.prompt_tokens || 0;
-    setupTokensOut += usage.completion_tokens || 0;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 120_000); // 2 min timeout
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${key}`,
+        "X-Title": "Vendi",
+      },
+      body: JSON.stringify({ model, messages, tools, max_tokens: 4096, parallel_tool_calls: true }),
+      signal: controller.signal,
+    });
+    if (!res.ok) throw new Error(`LLM error ${res.status}: ${await res.text()}`);
+    const json = await res.json();
+    const usage = json?.usage;
+    if (usage) {
+      setupTokensIn += usage.prompt_tokens || 0;
+      setupTokensOut += usage.completion_tokens || 0;
+    }
+    return json;
+  } finally {
+    clearTimeout(timeout);
   }
-  return json;
 }
 
 // ── DB persistence helpers ──────────────────────────────────────────────────
@@ -260,15 +267,24 @@ async function runAgentLoop(ctx: LoopContext): Promise<string> {
     ctx.llmMessages.push(msg);
 
     if (msg.tool_calls && msg.tool_calls.length > 0) {
-      for (const tc of msg.tool_calls) {
-        const { name, arguments: argsStr } = tc.function;
-        const statusMap: Record<string, string> = { read_file: "Reading files...", list_files: "Browsing project...", search_code: "Searching code...", run_command: "Running commands..." };
+      const toolNames = msg.tool_calls.map((tc: any) => tc.function.name);
+      const statusMsg = toolNames.length > 1
+        ? `Running ${toolNames.length} tools in parallel...`
+        : { read_file: "Reading files...", list_files: "Browsing project...", search_code: "Searching code...", run_command: "Running commands..." }[toolNames[0]] || "Working...";
+      await persistState(ctx.projectId, { status: statusMsg });
 
-        await persistState(ctx.projectId, { status: statusMap[name] || "Working..." });
+      // Execute all tool calls in parallel
+      const results = await Promise.all(
+        msg.tool_calls.map(async (tc: any) => {
+          const { name, arguments: argsStr } = tc.function;
+          let args: Record<string, string>;
+          try { args = JSON.parse(argsStr); } catch { args = {}; }
+          const result = await executeTool(ctx.sandbox, name, args);
+          return { tc, name, args, result };
+        })
+      );
 
-        let args: Record<string, string>;
-        try { args = JSON.parse(argsStr); } catch { args = {}; }
-        const result = await executeTool(ctx.sandbox, name, args);
+      for (const { tc, name, args, result } of results) {
         ctx.toolCalls.push({
           id: crypto.randomUUID(),
           name,
@@ -279,7 +295,7 @@ async function runAgentLoop(ctx: LoopContext): Promise<string> {
         ctx.llmMessages.push({ role: "tool", tool_call_id: tc.id, content: result });
       }
 
-      // Persist after each LLM iteration (batch tool calls)
+      // Persist once after all tool calls complete
       await persistState(ctx.projectId, {
         toolCalls: ctx.toolCalls,
         llmHistory: ctx.llmMessages,
