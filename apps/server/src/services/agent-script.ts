@@ -75,7 +75,8 @@ function executeTool(name, args) {
         const dir = args.path.substring(0, args.path.lastIndexOf("/"));
         if (dir) fs.mkdirSync(dir, { recursive: true });
         fs.writeFileSync(args.path, args.content);
-        return "File written successfully.";
+        const preview = typeof args.content === "string" ? args.content.slice(0, 1500) : "";
+        return preview || "File written successfully.";
       }
       case "list_files": {
         const out = execSync(\`find \${args.path} -maxdepth 3 -type f 2>/dev/null | head -80\`, { encoding: "utf8", timeout: 10_000 });
