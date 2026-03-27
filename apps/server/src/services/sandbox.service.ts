@@ -34,17 +34,15 @@ export async function startSessionSandbox(
   const [ghEncrypted, ghIv] = githubAccount.accessToken.split("|");
   const githubToken = decrypt(ghEncrypted, ghIv);
 
-  // Create empty sandbox (no per-project template)
-  const sandbox = await Sandbox.create({
+  // Create sandbox from the vendi-session template (8 CPU / 8GB RAM)
+  const sandbox = await Sandbox.create("vendi-session", {
     timeoutMs: project.maxSessionDurationMin * 60 * 1000,
-    cpuCount: 8,
-    memoryMB: 16384,
     envs: {
       GITHUB_TOKEN: githubToken,
       ...(env.OPENAI_API_KEY ? { OPENAI_API_KEY: env.OPENAI_API_KEY } : {}),
       ...(env.OPENROUTER_API_KEY ? { OPENROUTER_API_KEY: env.OPENROUTER_API_KEY } : {}),
     },
-  } as any);
+  });
 
   const branchName = `vendi/session-${sessionId}`;
 

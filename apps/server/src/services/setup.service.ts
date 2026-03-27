@@ -362,7 +362,7 @@ export async function startSetupSession(projectId: string, userId: string): Prom
   (async () => {
     try {
       await persistState(projectId, { status: "Creating sandbox..." });
-      const sandbox = await Sandbox.create({ timeoutMs: 30 * 60_000, cpuCount: 8, memoryMB: 16384 } as any);
+      const sandbox = await Sandbox.create("vendi-session", { timeoutMs: 30 * 60_000 });
       sandboxCache.set(projectId, sandbox);
       scheduleSandboxCleanup(projectId);
       await persistState(projectId, { sandboxId: sandbox.sandboxId });
