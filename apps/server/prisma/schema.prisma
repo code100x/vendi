@@ -111,6 +111,7 @@ model Project {
   envVarsIv             String?
   contextInstructions   String?        @db.Text
   startupCommands       String[]
+  migrationCommands     String[]
   requiredServices      String[]
   allowedFilePatterns   String[]
   devServerPort         Int            @default(3000)

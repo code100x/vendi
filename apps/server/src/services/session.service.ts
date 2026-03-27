@@ -10,7 +10,7 @@ export async function startSession(projectId: string, userId: string) {
   });
 
   if (project.templateStatus !== "READY") {
-    throw new Error("Project template is not ready");
+    throw new Error("Project is not configured yet");
   }
 
   // Check for active sessions (conflict detection)
@@ -131,6 +131,7 @@ function buildSystemPrompt(project: {
   allowedFilePatterns: string[];
   contextInstructions: string | null;
   startupCommands: string[];
+  migrationCommands: string[];
   requiredServices: string[];
   devServerPort: number;
 }): string {
@@ -143,6 +144,7 @@ function buildSystemPrompt(project: {
     `- Dev server port: ${project.devServerPort}`,
     `- Required services: ${project.requiredServices.length > 0 ? project.requiredServices.join(", ") : "none"}`,
     `- Startup commands: ${project.startupCommands.length > 0 ? project.startupCommands.join(" && ") : "check package.json"}`,
+    `- Migration commands: ${project.migrationCommands.length > 0 ? project.migrationCommands.join(" && ") : "none"}`,
     "- You have FULL SYSTEM ACCESS including sudo. Use it freely to:",
     "  - Start/stop/restart services (PostgreSQL, Redis, MySQL, etc.)",
     "  - Install system packages with apt-get",

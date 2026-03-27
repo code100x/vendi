@@ -3,7 +3,6 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "../lib/prisma";
 import { decrypt, encrypt } from "../lib/crypto";
 import { env } from "../config/env";
-import { buildProjectTemplate } from "./template.service";
 
 function getLLMConfig() {
   if (env.LLM_PROVIDER === "vercel") {
@@ -70,19 +69,22 @@ async function getSandbox(projectId: string): Promise<Sandbox> {
   return sandbox;
 }
 
-const SETUP_SYSTEM_PROMPT = `You are a project setup assistant for Vendi. Your job is to analyze a project's codebase and automatically configure it for running in a sandbox environment.
+const SETUP_SYSTEM_PROMPT = `You are a project setup assistant for Vendi. Your job is to analyze a project's codebase and detect the configuration needed to run it.
 
 The project is cloned at /workspace. ALWAYS use absolute paths starting with /workspace/ when reading files (e.g. /workspace/package.json, /workspace/docker-compose.yml).
 
 YOUR GOAL:
-Automatically detect the project configuration by reading files. Then ask the developer ONLY for their environment variable values (the .env file contents). Do NOT ask about code changes, architecture decisions, or how the project should be modified.
+1. Auto-detect startup commands and database migration commands from the codebase.
+2. Ask the developer ONLY for their environment variable values (.env file contents).
+3. Output the configuration.
 
-WHAT TO AUTO-DETECT (do NOT ask the user about these — figure them out yourself):
-1. Required services (PostgreSQL, Redis, MySQL, etc.) — detect from docker-compose.yml, package.json dependencies, prisma/schema.prisma, etc.
-2. Startup commands — detect from package.json scripts (look for "dev" script), Makefile, README instructions
-3. Dev server port — detect from vite.config.ts, next.config.js, .env.example, or package.json scripts
-4. Allowed file patterns — infer from project structure (e.g. src/**, app/**, pages/**)
-5. Context instructions — write a brief description of the project based on what you find
+WHAT TO AUTO-DETECT (do NOT ask the user — figure them out yourself):
+1. Startup commands — from package.json scripts (look for "dev" script), Makefile, README instructions
+2. Migration commands — from prisma (npx prisma migrate deploy / npx prisma db push), drizzle, knex, sequelize, TypeORM, or whatever ORM/migration tool the project uses. If none found, leave empty.
+3. Required services (PostgreSQL, Redis, MySQL, etc.) — from docker-compose.yml, package.json deps, prisma/schema.prisma, etc.
+4. Dev server port — from vite.config.ts, next.config.js, .env.example, or package.json scripts
+5. Allowed file patterns — infer from project structure (e.g. src/**, app/**, pages/**)
+6. Context instructions — a brief description of the project
 
 WHAT TO ASK THE USER:
 - Their .env file contents (environment variables). Reassure them values will be stored encrypted.
@@ -91,7 +93,7 @@ WHAT TO ASK THE USER:
 HOW TO WORK:
 1. Use your tools to read: package.json, .env.example or .env.sample, docker-compose.yml, README.md, prisma/schema.prisma, vite.config.ts or next.config.js, turbo.json or pnpm-workspace.yaml — read as many as exist
 2. Auto-detect ALL configuration from what you find
-3. Present a SHORT summary of what you detected (services, startup commands, port)
+3. Present a SHORT summary of what you detected (startup commands, migration commands, services)
 4. Ask the user to paste their .env file (or the values for the variables you found in .env.example)
 5. Once you have the .env values, IMMEDIATELY output the [SETUP_COMPLETE] block
 
@@ -99,9 +101,10 @@ OUTPUT FORMAT — when you have everything:
 
 [SETUP_COMPLETE]
 {
-  "requiredServices": ["postgres"],
   "startupCommands": ["npm install", "npm run dev"],
+  "migrationCommands": ["npx prisma migrate deploy"],
   "envVars": {"DATABASE_URL": "postgresql://...", "PORT": "3000"},
+  "requiredServices": ["postgres"],
   "devServerPort": 3000,
   "allowedFilePatterns": ["src/**", "public/**"],
   "contextInstructions": "Brief description of the project..."
@@ -111,13 +114,14 @@ OUTPUT FORMAT — when you have everything:
 RULES:
 - IMPORTANT: Batch multiple tool calls in a single response whenever possible. For example, read package.json, .env.example, and docker-compose.yml all in one response instead of one at a time. This saves time and cost.
 - ALWAYS read the codebase FIRST before saying anything to the user
-- Do NOT ask the user about services, ports, startup commands, or file patterns — detect them yourself
+- Do NOT ask the user about services, ports, startup commands, migration commands, or file patterns — detect them yourself
 - Do NOT ask about or suggest code changes — this is setup, not development
 - Parse the .env content the developer pastes and include ALL variables in envVars
 - Keep messages short — one message to summarize findings, one to ask for .env values
 - Do NOT output [SETUP_COMPLETE] until you have the env vars from the user
 - Keep the [SETUP_COMPLETE] JSON compact — no extra whitespace or commentary inside the block
 - Do NOT echo back or summarize all the env vars before the [SETUP_COMPLETE] block — go straight to the JSON output
+- If no migration commands are detected, set "migrationCommands" to an empty array []
 `;
 
 const tools = [
@@ -496,7 +500,7 @@ async function handlePossibleCompletion(projectId: string, chatMessages: ChatMsg
     chatMessages.push({
       id: crypto.randomUUID(),
       role: "SYSTEM",
-      content: "Project configured successfully! Building template...",
+      content: "Project configured successfully! You can now start sessions.",
       createdAt: new Date().toISOString(),
     });
     await cleanupSandbox(projectId);
@@ -551,6 +555,7 @@ export async function resetSetup(projectId: string): Promise<void> {
       envVarsIv: null,
       contextInstructions: null,
       startupCommands: [],
+      migrationCommands: [],
       requiredServices: [],
       allowedFilePatterns: [],
       devServerPort: 3000,
@@ -562,9 +567,10 @@ export async function resetSetup(projectId: string): Promise<void> {
 }
 
 async function applySetupConfig(projectId: string, config: any) {
-  const data: any = {};
+  const data: any = { templateStatus: "READY" };
   if (config.requiredServices) data.requiredServices = config.requiredServices;
   if (config.startupCommands) data.startupCommands = config.startupCommands;
+  if (config.migrationCommands) data.migrationCommands = config.migrationCommands;
   if (config.devServerPort) data.devServerPort = config.devServerPort;
   if (config.allowedFilePatterns) data.allowedFilePatterns = config.allowedFilePatterns;
   if (config.contextInstructions) data.contextInstructions = config.contextInstructions;
@@ -576,7 +582,6 @@ async function applySetupConfig(projectId: string, config: any) {
     data.envVarsIv = iv;
   }
   await prisma.project.update({ where: { id: projectId }, data });
-  buildProjectTemplate(projectId).catch(console.error);
 }
 
 async function cleanupSandbox(projectId: string) {

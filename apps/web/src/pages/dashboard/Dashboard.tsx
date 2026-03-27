@@ -22,15 +22,14 @@ import {
 
 function TemplateStatusBadge({ status }: { status: Project["templateStatus"] }) {
   const config = {
-    PENDING: { label: "Pending", className: "bg-gray-100 text-gray-600" },
-    BUILDING: { label: "Building", className: "bg-yellow-100 text-yellow-700" },
-    READY: { label: "Ready", className: "bg-green-100 text-green-700" },
-    FAILED: { label: "Failed", className: "bg-red-100 text-red-700" },
+    PENDING: { label: "Not Configured", className: "bg-gray-100 text-gray-600" },
+    BUILDING: { label: "Not Configured", className: "bg-gray-100 text-gray-600" },
+    READY: { label: "Configured", className: "bg-green-100 text-green-700" },
+    FAILED: { label: "Not Configured", className: "bg-gray-100 text-gray-600" },
   };
   const { label, className } = config[status];
   return (
     <span className={cn("inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium", className)}>
-      {status === "BUILDING" && <Loader2 className="mr-1 h-3 w-3 animate-spin" />}
       {label}
     </span>
   );

@@ -9,6 +9,7 @@ export interface Project {
   defaultBranch: string;
   contextInstructions: string | null;
   startupCommands: string[];
+  migrationCommands: string[];
   requiredServices: string[];
   allowedFilePatterns: string[];
   devServerPort: number;

@@ -99,11 +99,11 @@ router.post("/", async (req: Request, res: Response) => {
         .json({ error: "Not a member of this organization" });
     }
 
-    // Verify project template is READY
+    // Verify project is configured
     if (project.templateStatus !== "READY") {
       return res
         .status(400)
-        .json({ error: `Project template is not ready. Current status: ${project.templateStatus}` });
+        .json({ error: `Project is not configured yet. Please complete setup first.` });
     }
 
     // Start the session via service

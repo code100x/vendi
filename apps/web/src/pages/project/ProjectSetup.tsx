@@ -200,8 +200,6 @@ export function ProjectSetup() {
     }
   }, [orgId, projectId]);
 
-  const templateStatus = project?.templateStatus;
-
   return (
     <div className="flex h-[calc(100vh-3rem)] flex-col max-w-3xl mx-auto">
       {/* Header */}
@@ -344,35 +342,19 @@ export function ProjectSetup() {
         <div ref={messagesEndRef} />
       </div>
 
-      {/* Template build status */}
-      {setupComplete && templateStatus && (
-        <div className={cn(
-          "px-4 py-2 text-sm border-t",
-          templateStatus === "BUILDING" && "bg-yellow-50 text-yellow-800 border-yellow-200",
-          templateStatus === "READY" && "bg-green-50 text-green-800 border-green-200",
-          templateStatus === "FAILED" && "bg-red-50 text-red-800 border-red-200"
-        )}>
-          {templateStatus === "BUILDING" && (
-            <span className="flex items-center gap-2">
-              <Loader2 className="h-4 w-4 animate-spin" />
-              Building template... This may take a few minutes.
-            </span>
-          )}
-          {templateStatus === "READY" && (
-            <span className="flex items-center gap-2">
-              <CheckCircle2 className="h-4 w-4" />
-              Template ready! You can now start sessions.
-              <button
-                onClick={() => navigate(`/orgs/${orgId}`)}
-                className="ml-auto rounded-lg bg-green-700 px-3 py-1 text-xs font-medium text-white hover:bg-green-800"
-              >
-                Go to Dashboard
-              </button>
-            </span>
-          )}
-          {templateStatus === "FAILED" && (
-            <span>Template build failed. Check the build log.</span>
-          )}
+      {/* Setup complete status */}
+      {setupComplete && (
+        <div className="px-4 py-2 text-sm border-t bg-green-50 text-green-800 border-green-200">
+          <span className="flex items-center gap-2">
+            <CheckCircle2 className="h-4 w-4" />
+            Project configured! You can now start sessions.
+            <button
+              onClick={() => navigate(`/orgs/${orgId}`)}
+              className="ml-auto rounded-lg bg-green-700 px-3 py-1 text-xs font-medium text-white hover:bg-green-800"
+            >
+              Go to Dashboard
+            </button>
+          </span>
         </div>
       )}
 

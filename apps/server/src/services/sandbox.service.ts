@@ -18,8 +18,8 @@ export async function startSessionSandbox(
     include: { org: true },
   });
 
-  if (project.templateStatus !== "READY" || !project.e2bTemplateId) {
-    throw new Error("Project template is not ready");
+  if (project.templateStatus !== "READY") {
+    throw new Error("Project is not configured yet");
   }
 
   // Get user's GitHub token for repo cloning
@@ -34,8 +34,8 @@ export async function startSessionSandbox(
   const [ghEncrypted, ghIv] = githubAccount.accessToken.split("|");
   const githubToken = decrypt(ghEncrypted, ghIv);
 
-  // Create sandbox from the project's built template
-  const sandbox = await Sandbox.create(project.e2bTemplateId, {
+  // Create empty sandbox (no per-project template)
+  const sandbox = await Sandbox.create({
     timeoutMs: project.maxSessionDurationMin * 60 * 1000,
     cpuCount: 8,
     memoryMB: 8192,
@@ -55,12 +55,27 @@ export async function startSessionSandbox(
       { requestTimeoutMs: 5_000 }
     );
 
-    // Clone the repo (use env var for token to avoid leaking in process list)
-    const cloneResult = await sandbox.commands.run(
+    // Install required system packages
+    const servicePkgs: string[] = [];
+    for (const svc of project.requiredServices) {
+      if (svc === "postgres") servicePkgs.push("postgresql", "postgresql-client");
+      else if (svc === "redis") servicePkgs.push("redis-server");
+      else if (svc === "mysql") servicePkgs.push("mysql-server");
+    }
+    const allPkgs = ["git", "curl", "xvfb", "x11vnc", "python3-pip", "chromium", ...servicePkgs].join(" ");
+    await sandbox.commands.run(
+      `sudo apt-get update && sudo apt-get install -y ${allPkgs} && pip3 install websockify --break-system-packages && sudo apt-get clean`,
+      { requestTimeoutMs: 180_000 }
+    );
+
+    // Install global npm tools
+    await sandbox.commands.run("npm install -g bun @openai/codex", { requestTimeoutMs: 60_000 });
+
+    // Clone the repo
+    await sandbox.commands.run(
       `GIT_TOKEN="${githubToken}" git clone https://x-access-token:${githubToken}@github.com/${project.githubRepoFullName}.git /workspace 2>&1`,
       { requestTimeoutMs: 120_000 }
     ).catch((e: any) => {
-      // CommandExitError has .result with stdout/stderr
       throw new Error(`Git clone failed: ${e.result?.stdout || e.message}`);
     });
 
@@ -80,20 +95,29 @@ export async function startSessionSandbox(
       await sandbox.files.write("/workspace/.env", envContent);
     }
 
-    // Start services that are baked into the template
+    // Start required services
     for (const service of project.requiredServices) {
       try {
         if (service === "postgres") {
-          await sandbox.commands.run("sudo service postgresql start 2>/dev/null || service postgresql start 2>/dev/null || true", {
+          await sandbox.commands.run("sudo service postgresql start 2>/dev/null || true", {
             requestTimeoutMs: 30_000,
           });
         } else if (service === "redis") {
-          await sandbox.commands.run("redis-server --daemonize yes 2>/dev/null || sudo service redis-server start 2>/dev/null || true", {
+          await sandbox.commands.run("redis-server --daemonize yes 2>/dev/null || true", {
             requestTimeoutMs: 10_000,
           });
         }
       } catch {
-        // Services may already be running from template init
+        // Best-effort service start
+      }
+    }
+
+    // Run migration commands
+    for (const cmd of project.migrationCommands) {
+      try {
+        await sandbox.commands.run(`cd /workspace && ${cmd}`, { requestTimeoutMs: 60_000 });
+      } catch {
+        // Migration may fail if deps aren't installed yet — agent will handle it
       }
     }
 
