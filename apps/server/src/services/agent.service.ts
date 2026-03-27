@@ -9,6 +9,7 @@ const VENDI_DIR = "/workspace/.vendi";
 const CONFIG_PATH = `${VENDI_DIR}/agent-config.json`;
 const SCRIPT_PATH = `${VENDI_DIR}/agent.mjs`;
 const LOG_PATH = `${VENDI_DIR}/agent-log.jsonl`;
+const STDERR_PATH = `${VENDI_DIR}/agent-stderr.log`;
 
 const AGENT_STALE_MS = 10 * 60 * 1000; // 10 minute safety valve
 
@@ -108,8 +109,8 @@ export async function startAgentTurn(config: StartAgentConfig): Promise<void> {
     },
   });
 
-  // Start agent as background process in sandbox
-  await sandbox.commands.run(`node ${SCRIPT_PATH} > /dev/null 2>&1 &`, {
+  // Start agent as background process in sandbox (capture stderr for crash debugging)
+  await sandbox.commands.run(`node ${SCRIPT_PATH} > /dev/null 2>${STDERR_PATH} &`, {
     background: true,
     requestTimeoutMs: 5_000,
   });
@@ -156,11 +157,19 @@ export async function syncAgentProgress(sessionId: string): Promise<void> {
 
   if (!session?.agentRunId || !session.sandboxId) return;
 
-  // Safety valve: if agent has been running > 1 hour, clean up
+  // Safety valve: if agent has been running too long, clean up
   if (session.agentRunStartedAt) {
     const age = Date.now() - session.agentRunStartedAt.getTime();
     if (age > AGENT_STALE_MS) {
-      console.log(`[Agent] Stale agent run for session ${sessionId}, cleaning up`);
+      // Try to read stderr for debugging context
+      let stderrHint = "";
+      try {
+        const sbx = await Sandbox.connect(session.sandboxId);
+        const stderr = String(await sbx.files.read(STDERR_PATH)).trim();
+        if (stderr) stderrHint = ` stderr: ${stderr.slice(0, 500)}`;
+      } catch {}
+
+      console.log(`[Agent] Stale agent run for session ${sessionId} (${Math.round(age / 1000)}s), cleaning up.${stderrHint}`);
       if (session.agentWorkingMsgId) {
         await prisma.chatMessage.delete({ where: { id: session.agentWorkingMsgId } }).catch(() => {});
       }
@@ -203,8 +212,18 @@ export async function syncAgentProgress(sessionId: string): Promise<void> {
         "pgrep -f 'node.*agent\\.mjs' > /dev/null 2>&1 && echo ALIVE || echo DEAD",
         { requestTimeoutMs: 5_000 }
       );
-      if (psResult.stdout.trim() === "DEAD" && entries.length > 0) {
-        console.log(`[Agent] Agent process died without writing done/error for session ${sessionId}`);
+      if (psResult.stdout.trim() === "DEAD") {
+        // Read stderr log for crash debugging
+        let stderrContent = "";
+        try {
+          stderrContent = String(await sandbox.files.read(STDERR_PATH)).trim();
+        } catch {}
+
+        console.log(
+          `[Agent] Agent process died for session ${sessionId} (${entries.length} log entries).` +
+          (stderrContent ? ` stderr: ${stderrContent.slice(0, 500)}` : "")
+        );
+
         // Treat as a crashed agent — synthesize an error entry
         const toolCalls: ToolCallEntry[] = entries
           .filter((e) => e.type === "tool_call")
@@ -223,7 +242,7 @@ export async function syncAgentProgress(sessionId: string): Promise<void> {
           data: {
             sessionId,
             role: "SYSTEM",
-            content: "The agent encountered an unexpected error. You can send a new message to try again.",
+            content: "The agent crashed unexpectedly. You can send a new message to try again.",
             metadata: toolCalls.length > 0 ? JSON.parse(JSON.stringify({ toolCalls })) : undefined,
           },
         });
